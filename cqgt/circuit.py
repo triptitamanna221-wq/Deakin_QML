@@ -1,16 +1,27 @@
 import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit import Parameter
-from qiskit.quantum_info import Statevector
+from qiskit.quantum_info import SparsePauliOp, Statevector
+
 
 def amplitude_embed(circuit, x_scalar, qubit):
     theta = np.arctan(x_scalar)
     circuit.ry(2 * theta, qubit)
 
-def ctqw_layer(circuit, edges, tau0_param):
-    # Trotterized approx of e^{-i L tau0}: RZZ on edges scaled by tau0
-    for (i, j) in edges:
-        circuit.rzz(tau0_param, i, j)
+
+def ctqw_layer(circuit, edges, edge_weights, tau0_param):
+    """Trotterized e^{-i H_hop tau0} where H_hop = sum_ij w_ij (X_iX_j + Y_iY_j)/2.
+
+    RXX and RYY commute (both equal -Z_iZ_j under composition), so
+    RXX(theta) . RYY(theta) = exp(-i theta/2 (X_iX_j + Y_iY_j)) exactly, for any
+    Trotter order. theta_ij = tau0 * w_ij so each edge's weight actually enters
+    the angle -- a single shared tau0 would discard W_ij entirely.
+    """
+    for (i, j), w_ij in zip(edges, edge_weights):
+        theta_ij = tau0_param * float(w_ij)
+        circuit.rxx(theta_ij, i, j)
+        circuit.ryy(theta_ij, i, j)
+
 
 def variational_layer(circuit, edges, n_qubits, layer_idx):
     ry_params = [Parameter(f"phi_{layer_idx}_{i}") for i in range(n_qubits)]
@@ -21,18 +32,20 @@ def variational_layer(circuit, edges, n_qubits, layer_idx):
         circuit.rzz(p, i, j)
     return ry_params, zz_params
 
+
 def hamiltonian_layer(circuit, h_diag_part, layer_idx):
     delta = Parameter(f"delta_{layer_idx}")
     for i, h_i in enumerate(h_diag_part):
         circuit.rz(2 * delta * h_i, i)
     return delta
 
-def build_cqgt_circuit(n_qubits, edges, x_scalars, h_diag_part, n_layers=3):
+
+def build_cqgt_circuit(n_qubits, edges, edge_weights, x_scalars, h_diag_part, n_layers=3):
     qc = QuantumCircuit(n_qubits)
     for i, x in enumerate(x_scalars):
         amplitude_embed(qc, x, i)
     tau0 = Parameter("tau0")
-    ctqw_layer(qc, edges, tau0)
+    ctqw_layer(qc, edges, edge_weights, tau0)
     all_params = {"tau0": tau0}
     for l in range(n_layers):
         ry_p, zz_p = variational_layer(qc, edges, n_qubits, l)
@@ -40,10 +53,15 @@ def build_cqgt_circuit(n_qubits, edges, x_scalars, h_diag_part, n_layers=3):
         all_params[f"layer_{l}"] = (ry_p, zz_p, delta)
     return qc, all_params
 
+
 def expectation_z(qc, bound_params, n_qubits):
     bound = qc.assign_parameters(bound_params)
     sv = Statevector.from_instruction(bound)
-    return np.array([sv.expectation_value(("Z" + "I" * (n_qubits - 1 - i)).rjust(n_qubits, "I")[::-1] if False else _z_string(n_qubits, i)) for i in range(n_qubits)]).real
+    return np.array([
+        sv.expectation_value(SparsePauliOp(_z_string(n_qubits, i)))
+        for i in range(n_qubits)
+    ]).real
+
 
 def _z_string(n, i):
     return "".join("Z" if k == i else "I" for k in range(n))[::-1]

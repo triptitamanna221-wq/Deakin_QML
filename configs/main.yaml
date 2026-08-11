@@ -1,0 +1,47 @@
+# Main experiment configuration for CQGT.
+# All values below are the brief's defaults; nothing here is tuned to results yet
+# (Phase 0 — foundation only). Consumed by later phases via cqgt.seeding and
+# the data/model/experiment entry points as they are built.
+
+seed_list: [0, 1, 2, 3, 4]
+
+data:
+  n_institutions: 12          # qubits == institutions; hard cap per BRIEF.md is 14
+  n_snapshots: 120            # weekly panel, T
+  crisis_window: [70, 85]     # t-indices with elevated shock magnitude / core density
+  fitness_ar1_rho: 0.95
+  edge_resample_frac: 0.05
+  core_periphery_fallback:
+    n_core: 4
+    n_periphery: 8
+    p_core: 0.9
+    p_periphery: 0.05
+    p_core_periphery: 0.3
+    pareto_alpha: 2.5
+  target_base_rate: [0.08, 0.15]   # tune shock magnitude to land in this band
+
+hamiltonian:
+  alpha: 1.0   # network contagion (hopping) coupling
+  beta: 1.0    # per-institution risk potential coupling
+  gamma: 1.0   # macro coupling
+  n_variational_layers: 3
+  n_ancilla_attention: 2
+
+training:
+  optimizer: adam
+  lr: 0.01
+  lr_schedule: cosine
+  grad_clip_norm: 1.0
+  loss: class_weighted_bce
+  layer_growth: [1, 2, 3]
+  layer_init_std: 0.31415926535  # pi/10, applied to N(theta*_prev, .) on new layers
+
+splits:
+  # Strict rolling temporal splits; enforced in code (see cqgt/seeding.py callers
+  # in later phases), not just here.
+  train_frac: 0.6
+  val_frac: 0.2
+  test_frac: 0.2
+
+macro:
+  n_factors: 3   # PCA'd FRED factors if data/raw/fred_*.csv present, else synthetic AR(1)

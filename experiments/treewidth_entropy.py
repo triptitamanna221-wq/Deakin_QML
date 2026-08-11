@@ -4,7 +4,8 @@ from scipy.stats import pearsonr
 from qiskit.quantum_info import Statevector, partial_trace, entropy
 
 def approx_treewidth(G):
-    _, tw = nx.algorithms.approximation.treewidth_min_fill_in(G.to_undirected())
+    # treewidth_min_fill_in returns (width, decomposition_tree) -- in that order.
+    tw, _ = nx.algorithms.approximation.treewidth_min_fill_in(G.to_undirected())
     return tw
 
 def entanglement_entropy(qc_bound, n_qubits, subsystem):

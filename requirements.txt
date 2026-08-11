@@ -1,11 +1,22 @@
-numpy
-scipy
-pandas
-networkx
-scikit-learn
-xgboost
-torch
-torch_geometric
-qiskit
-qiskit-aer
-matplotlib
+# Pinned to what is installed and verified against on this machine
+# (Python 3.12, macOS arm64, CPU only). Reinstall with:
+#   python3.12 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+# xgboost additionally needs the OpenMP runtime on macOS: brew install libomp
+numpy==2.5.2
+scipy==1.18.0
+pandas==3.0.5
+networkx==3.6.1
+scikit-learn==1.9.0
+xgboost==3.4.0
+torch==2.13.0
+torch_geometric==2.8.0.post1
+qiskit==2.5.1
+qiskit-aer==0.17.2
+# Optional: only used by baselines/quantum_kernel.py's FidelityQuantumKernel SVM.
+# That import is guarded — if this package is absent or its API has drifted,
+# the quantum-kernel baseline is skipped and noted in results, per BRIEF.md §2.4.
+qiskit-machine-learning==0.9.0
+matplotlib==3.11.1
+pyyaml==6.0.3
+pytest==9.1.1

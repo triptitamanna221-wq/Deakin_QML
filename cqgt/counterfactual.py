@@ -12,9 +12,10 @@ def top_k_edges(screened_scores, edges, k):
     order = np.argsort(vals)[::-1][:k]
     return [edges[idx] for idx in order]
 
-def exact_counterfactual(model_predict_fn, W, X, edges_to_test, alpha, beta, gamma,
-                          macro_loadings, macro_factors, f_weights):
-    from cqgt.hamiltonian import build_hamiltonian_diag_and_laplacian
+def exact_counterfactual(model_predict_fn, W, X, edges_to_test):
+    """model_predict_fn(W, X) -> p_hat; it must already close over any trained
+    model state (Hamiltonian coefficients, macro factors, learned weights).
+    Re-deriving those here was dead code -- the caller owns the model."""
     R0 = aggregate_risk(model_predict_fn(W, X))
     results = {}
     for (i, j) in edges_to_test:
