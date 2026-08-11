@@ -372,3 +372,37 @@ sample size.
 infrastructure (loader, panel selection, reconstruction, fallback, temporal
 panel, macro factors, features, cascade, splits, GATE 1 script) is built,
 tested, and reproducible regardless of how the labeling design evolves.
+
+### User decision on GATE 1 (2026-08-11): increase statistical power, two refinements
+
+User chose Option 1 (increase statistical power), not Option 3 (redesign the
+shock mechanism to correlate with network position — explicitly rejected as
+manufacturing the signal being tested for). Two specific refinements:
+
+1. **M=20 shock realizations per snapshot**, each a separate training
+   example (120 x 20 = 2400 scenario-examples instead of 120), with a
+   binary "shocked this draw" node feature appended to the 6-dim feature
+   vector (7-dim total). Not leakage: the shock set is the input scenario
+   (which banks are hit), not the outcome (who ends up distressed) — this
+   is the standard stress-testing framing ("given this scenario and this
+   network, who fails?"), analogous to feeding a GNN which nodes are
+   seeds in an influence-propagation task.
+2. **Primary metric restricted to the non-directly-shocked subset.**
+   Directly-shocked banks fail deterministically under `shock_frac=1.0`
+   (full wipeout always crosses the 30% loss threshold by a huge margin —
+   confirmed in the original GATE 1 run, loss fractions of 500-1100%+ for
+   shocked banks), so including them in AUPRC inflates every model
+   equally on a trivially-predictable subset and masks the actual
+   comparison. The non-shocked subset is pure contagion prediction — the
+   only place network structure can causally matter, and exactly the
+   claim the paper makes.
+
+**PRE-REGISTERED STOPPING RULE (recorded before running this refined test):**
+if, after both refinements, the GCN still does not beat logistic regression
+on the non-shocked (spillover) subset, we accept the negative finding,
+state the caveat plainly in the paper, and proceed to Phase 2 regardless.
+No third redesign will be attempted. This rule is being written down now,
+before the refined numbers exist, specifically to prevent iterating on the
+label design until a comparison happens to look favorable.
+
+### GATE 1 refined result (M=20 Monte Carlo shock draws, spillover-only metric)
