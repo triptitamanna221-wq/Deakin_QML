@@ -10,7 +10,15 @@ torch ops, so autograd flows through exactly -- no parameter-shift needed.
 """
 import torch
 
-CDTYPE = torch.complex128
+# complex64 (paired with float32 real/imag parts): ~1e-7 relative precision,
+# far more than gradients need. Verified against Qiskit's complex128
+# Statevector at a loosened tolerance in tests/test_qsim.py -- switched from
+# complex128 for ~2x speed and half the memory (profiled in NOTES.md's
+# Phase 2 performance section; qsim is compute-bound on batch_size x n_gates,
+# not Python call overhead, so precision is the only lever that helps
+# without changing the model architecture or shrinking N).
+CDTYPE = torch.complex64
+RDTYPE = torch.float32
 
 
 def zero_state(batch, n_qubits, device=None):
@@ -24,7 +32,7 @@ def _axis(q, n_qubits):
 
 
 def _bexpand(theta, batch, device):
-    theta = torch.as_tensor(theta, dtype=torch.float64, device=device)
+    theta = torch.as_tensor(theta, dtype=RDTYPE, device=device)
     return theta.expand(batch) if theta.ndim == 0 else theta
 
 

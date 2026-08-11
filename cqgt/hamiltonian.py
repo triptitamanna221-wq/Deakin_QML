@@ -2,7 +2,8 @@ import numpy as np
 
 def normalized_laplacian(W):
     d = W.sum(axis=1)
-    d_inv_sqrt = np.where(d > 0, 1.0 / np.sqrt(d), 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        d_inv_sqrt = np.where(d > 0, 1.0 / np.sqrt(d), 0.0)
     D_inv_sqrt = np.diag(d_inv_sqrt)
     return np.eye(len(W)) - D_inv_sqrt @ W @ D_inv_sqrt
 

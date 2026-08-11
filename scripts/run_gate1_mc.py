@@ -15,26 +15,13 @@ import torch
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score
 
-from cqgt.data.cascade import generate_mc_labels_for_panel
-from cqgt.data.pipeline import EXTRA_FIELDS, build_fallback_dataset, build_real_dataset
+from cqgt.data.pipeline import (build_fallback_dataset, build_paired_dataset, build_real_dataset,
+                                 features_with_shock_indicator)
 from cqgt.seeding import set_seed
 from scripts.run_gate1 import QuickGCN, _edges_from_W
 
 N_MC = 20
-
-
-def build_mc_dataset(base_ds, n_mc=N_MC, seed=0):
-    y, loss_frac, shocked_mask, diag = generate_mc_labels_for_panel(
-        base_ds["W_panel"], base_ds["y832_panel"], base_ds["m362_panel"],
-        p_shock=base_ds["p_shock"], seed=seed, n_mc=n_mc)
-    base_ds.update(y_mc=y, loss_frac_mc=loss_frac, shocked_mask_mc=shocked_mask, mc_diag=diag)
-    return base_ds
-
-
-def _features_with_shock_indicator(ds, t, m):
-    x = ds["X_std"][t]  # (n, 6)
-    shocked = ds["shocked_mask_mc"][t, m].astype(np.float32)[:, None]  # (n, 1)
-    return np.concatenate([x, shocked], axis=1)  # (n, 7)
+_features_with_shock_indicator = features_with_shock_indicator  # local alias, kept for readability below
 
 
 def train_logreg_mc(ds, train_t, n_mc):
@@ -98,8 +85,7 @@ def evaluate_spillover_auprc(ds, test_t, n_mc, predict_fn):
     return auprc_all, auprc_spillover, prevalence_spillover, mask_all.sum()
 
 
-def run_refined_gate1_for(name, base_ds, n_mc=N_MC, seed=0):
-    ds = build_mc_dataset(base_ds, n_mc=n_mc, seed=seed)
+def run_refined_gate1_for(name, ds, n_mc=N_MC, seed=0):
     train_t, test_t = ds["train_t"], ds["test_t"]
 
     clf = train_logreg_mc(ds, train_t, n_mc)
@@ -138,12 +124,12 @@ def run_refined_gate1_for(name, base_ds, n_mc=N_MC, seed=0):
 
 if __name__ == "__main__":
     results = []
-    for name, builder in [
-        ("real_maxent", lambda: build_real_dataset("maxent", seed=0)),
-        ("real_mindensity", lambda: build_real_dataset("mindensity", seed=0)),
-        ("fallback_core_periphery", lambda: build_fallback_dataset(seed=0)),
+    for name, source in [
+        ("real_maxent", "maxent"),
+        ("real_mindensity", "mindensity"),
+        ("fallback_core_periphery", "fallback"),
     ]:
-        ds = builder()
+        ds = build_paired_dataset(source, n_mc=N_MC, seed=0)
         results.append(run_refined_gate1_for(name, ds))
 
     print("\n=== GATE 1 REFINED SUMMARY (spillover subset only) ===")

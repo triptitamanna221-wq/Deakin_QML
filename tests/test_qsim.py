@@ -1,6 +1,15 @@
 """Mandatory GATE 0 test: cqgt/qsim.py (PyTorch statevector simulator) must
 match qiskit.quantum_info.Statevector exactly, since it replaces Qiskit in
-the training loop and correctness here cannot be taken on faith."""
+the training loop and correctness here cannot be taken on faith.
+
+qsim runs in complex64 (switched from complex128 in Phase 2 for ~2x speed,
+see NOTES.md's performance section). Empirically measured against this exact
+suite (n=2..5 qubits, 4 seeds, mixed RY/hopping/RZZ/RZ circuits) before
+picking a tolerance: max amplitude error 2.2e-7, max <Z> error 5.4e-7 --
+matches the ~1e-7 expected from complex64's ~7 decimal digits of precision.
+ATOL is set to 1e-5, an order of magnitude above the measured worst case:
+comfortable headroom against a flaky failure, still tight enough that a real
+gate/wiring bug (which produces O(1) error, not O(1e-6)) would be caught."""
 import numpy as np
 import pytest
 import torch
@@ -9,7 +18,7 @@ from qiskit.quantum_info import SparsePauliOp, Statevector
 
 from cqgt import qsim
 
-ATOL = 1e-6
+ATOL = 1e-5
 
 
 def _random_circuit_case(seed, n, batch):
@@ -103,4 +112,4 @@ def test_hopping_conserves_total_z():
     z0_post = qsim.expect_z(state2, 0, n)
     z1_post = qsim.expect_z(state2, 1, n)
     assert not torch.allclose(z0_pre, z0_post, atol=1e-3)
-    assert not torch.allclose(z1_post, torch.tensor([1.0], dtype=torch.float64), atol=1e-3)
+    assert not torch.allclose(z1_post, torch.ones_like(z1_post), atol=1e-3)

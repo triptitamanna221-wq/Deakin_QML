@@ -4,6 +4,131 @@ Running log per BRIEF.md §7. Newest entries at the bottom of each phase's secti
 
 ---
 
+## HANDOFF (2026-08-11, end of session) — read this first, written for zero context
+
+**What this project is:** CQGT (Causal Quantum Graph Transformer) for
+systemic credit-risk contagion, per `BRIEF.md` in the repo root. Read that
+file first if anything below is unclear — it's the full spec this session
+has been executing against, phase by phase, with gates that must pass
+before advancing.
+
+**Current phase: Phase 2 (Model), NOT complete.** Phases 0 and 1 are done
+and committed (GATE 0 and GATE 1 both PASS — see their sections below).
+Phase 2's code is built and unit-tested, but **GATE 2 has not been passed**
+and **Phase 3 has not started.** Do not start Phase 3 until GATE 2 passes
+for real (see below) — that is a standing project rule (BRIEF.md §6), not
+new for this handoff.
+
+**Exactly what is blocked on what, right now:**
+
+1. **Immediate next action:** re-run two profiling commands from a clean
+   shell (the previous session's background processes will not survive
+   into this one; do not try to reattach to them, just re-run):
+   ```
+   source .venv/bin/activate
+   # (a) real per-epoch cost for fallback L3 and all of maxent (mindensity
+   #     L1/L2/L3 and fallback L1/L2 are already known — see the "Real
+   #     per-epoch measurements" section a few pages below this one)
+   python3 -c "
+   import time
+   import numpy as np
+   from cqgt.model import CQGTModel
+   from cqgt.data.pipeline import build_paired_dataset, attach_macro_factors
+   from cqgt.train import train_stage
+   for source in ['fallback', 'maxent']:
+       ds = build_paired_dataset(source, n_mc=20, seed=0)
+       attach_macro_factors(ds, seed=0)
+       n = ds['W_panel'].shape[1]
+       edges = list(map(tuple, np.argwhere(ds['W_panel'][0] > 0)))
+       print(f'{source}: n_edges={len(edges)}', flush=True)
+       for L in [1,2,3]:
+           model = CQGTModel(n_qubits=n, n_features=7, edges=edges, n_layers=L)
+           start = time.time()
+           model, hist = train_stage(model, ds, epochs=2, n_mc_train=None)
+           dt = time.time()-start
+           print(f'  L={L}: {dt/2:.1f}s/epoch', flush=True)
+   "
+   # (b) the convergence question: does mindensity L=3's loss actually
+   #     plateau, or is it still moving meaningfully, over more epochs?
+   #     (a 3-epoch run already showed only ~0.001-0.002/epoch movement —
+   #     inconclusive on its own; see "Flat loss curve" section below for
+   #     the full context and the LR-normalization hypothesis to test
+   #     alongside this)
+   python3 -c "
+   import numpy as np
+   from cqgt.model import CQGTModel
+   from cqgt.data.pipeline import build_paired_dataset, attach_macro_factors
+   from cqgt.train import train_stage
+   ds = build_paired_dataset('mindensity', n_mc=20, seed=0)
+   attach_macro_factors(ds, seed=0)
+   n = ds['W_panel'].shape[1]
+   edges = list(map(tuple, np.argwhere(ds['W_panel'][0] > 0)))
+   model = CQGTModel(n_qubits=n, n_features=7, edges=edges, n_layers=3)
+   model, hist = train_stage(model, ds, epochs=20, n_mc_train=None)
+   for i, h in enumerate(hist):
+       print(f'epoch {i}: {h:.5f}')
+   "
+   ```
+   Run both **in the background** (`run_in_background`/`&`) — the second
+   one takes on the order of 30-40 minutes at the measured ~102.5s/epoch
+   rate for L=3. **Do not run them in the foreground and block on them; do
+   other useful work (or just wait) while they complete, and watch memory
+   (`sysctl vm.swapusage`) if either seems to be taking far longer than its
+   own per-epoch rate would predict** — that was the actual bug found this
+   session (see "Swap-thrashing bug" section below), and while it's now
+   fixed and verified equivalent (gradient-accumulation refactor,
+   `tests/test_train.py::test_gradient_accumulation_matches_single_backward_over_stacked_mean`),
+   watch for it recurring under new configurations regardless.
+
+2. **Once those two results exist:** redo the Phase 3 wall-clock projection
+   from scratch using the real numbers (the "Wall-clock projection" table
+   currently in this file is explicitly marked VOID — do not use it). Apply
+   the standing pre-committed rule: if the convergence run shows `E>=3`
+   epochs/stage are genuinely needed (not just "still moving a little" —
+   read the LR-normalization hypothesis section before concluding this),
+   cut maxent's main-table seed count from 5 to 2 (never sparsify maxent —
+   the user was explicit and detailed about why, see below). Recompute the
+   total wall-clock at whatever `E` and seed counts result, and **report it
+   to the user before starting Phase 3** — they set an explicit ~6 hour cap
+   and want to be told, not have the decision made for them, if it's over.
+
+3. **Only after that: re-run GATE 2 properly** (full `L=1->2->3` layer
+   growth, real `epochs_per_stage` from the convergence evidence, full
+   `M=20`, on at minimum mindensity) and confirm loss decreases and CQGT
+   beats the validation prevalence floor. **GATE 2 has never actually
+   passed** — every attempt so far was either killed early or was a
+   short/partial timing run. Do not report GATE 2 as passed without this.
+
+4. **Then, and only then, Phase 3** (baselines, ablations, all metrics,
+   the seed/variant budget already agreed: 10 seeds mindensity + 5 maxent +
+   5 fallback for the main table, 7 ablations x 5 seeds on mindensity only,
+   per the user's explicit instructions this session).
+
+**Two substantive findings from this session that must reach the paper,
+regardless of what happens next (do not lose these):**
+- **Maxent is a complete directed graph at every snapshot** (132/132
+  possible edges, density=1.0000, treewidth=11=N-1 constant) — mechanistically
+  guaranteed (IPF/RAS can't zero a positive entry), not a fluke. Explains
+  maxent's weak GATE 1 spillover share and margin. **Excludes maxent from
+  the entanglement-entropy-vs-treewidth study (F3)** — no treewidth
+  variation to correlate against there; mindensity and the fallback carry
+  that study instead. Full detail in the "Compute budget negotiation"
+  section below.
+- **GATE 1 passed via a pre-registered statistical-power refinement**
+  (M=20 Monte Carlo shock draws/snapshot, spillover-only AUPRC metric) —
+  the original single-draw design showed a genuine negative result first,
+  which was reported honestly before the refinement was tried. See "GATE 1"
+  sections below for the full pre-registration/stopping-rule precedent,
+  which this session's compute-budget negotiation deliberately mirrored.
+
+**Everything else** (per-year FR Y-15 column mapping, the Eisenberg-Noe
+cascade calibration story, the N=12 panel selection, all defect fixes) is
+unchanged from what's recorded further down and does not need to be
+re-verified — only Phase 2 (model training / compute budget / GATE 2) is
+in an unfinished, actively-blocked state.
+
+---
+
 ## Phase 0 — Foundation (2026-08-11)
 
 ### Environment
@@ -467,3 +592,358 @@ source .venv/bin/activate
 python3 scripts/run_gate1.py      # original single-draw diagnostics
 python3 scripts/run_gate1_mc.py   # refined M=20 MC / spillover-only result
 ```
+
+---
+
+## Phase 2 — Model (2026-08-11)
+
+### User's four Phase 2 requirements (three were listed; flagged the
+discrepancy to the user and proceeded on these three, since they don't
+block starting the build):
+1. Parameter parity: CQGT and every GNN baseline roughly parameter-matched,
+   every table reports parameter counts.
+2. Paired evaluation: identical splits and identical shock draws across
+   all models, so paired bootstrap tests are possible later.
+3. 10 seeds, not 5, for the eventual Phase 3 experiment sweep.
+
+Addressed now: (1) `cqgt/data/pipeline.py::build_paired_dataset(source,
+seed, n_mc)` is the single entry point every model must use -- same
+`(source, seed, n_mc)` triple always yields identical rolling splits
+(`rolling_splits`, asserted in code since Phase 1) AND identical M shock
+draws (`generate_mc_labels_for_panel`, same `(seed, t, m)`-seeded RNG per
+draw). GATE 1's own scripts were refactored onto this shared function so
+there is only one paths to a paired dataset, not two slightly-different
+ones. (2) `CQGTModel.n_parameters()` reports total trainable scalar count;
+printed in every GATE 2 result and will be printed in every Phase 3 table.
+(3) is a Phase 3 concern (the actual seed sweep); noted for when baselines
+are built.
+
+### Architecture (BRIEF.md Sec 2.3), implemented in `cqgt/model.py`
+Built entirely on `cqgt/qsim.py` (never Qiskit, per the hard constraint) so
+training is exact backprop:
+1. Embed: `RY(2 arctan(w^T x_i))` per qubit, `w` a shared learnable linear
+   map from the 7-dim feature vector (6 standardized proxies + the
+   "shocked this draw" scenario indicator, see Phase 1's GATE 1 refinement)
+   to a scalar.
+2. CTQW encoder: one hopping (`RXX.RYY`) application per real exposure
+   edge, angle `= tau0 * Ltilde_ij` (`tau0` learnable, `>=0` via softplus).
+3. `L` variational layers (`L=1,2,3` via layer-by-layer growth, see
+   below), each: `RY(phi_i)` per qubit -> `RZZ(theta_ij)` on exposure edges
+   only (topology-matched ansatz -- parameters exist only where a real
+   edge exists, not all `N(N-1)` pairs) -> `e^{-i H_t delta_l}`, where
+   `H_t`'s entangling part is the same hopping term scaled by `alpha` and
+   its diagonal part is `RZ(2 delta_l h_i)`, `h_i = beta f_psi(x_i) +
+   gamma sum_k lambda_k^t beta_ik` (`f_psi`: 2-layer MLP; `beta_ik`:
+   learnable per-institution macro loadings; `lambda_k^t`: this
+   snapshot's real-or-synthetic macro factor value, see below).
+4. Measure `<Z_i>` -> `r`.
+5. Quantum fidelity attention on `n_a=2` ancilla qubits, reimplemented
+   against `qsim` (the original `cqgt/attention.py` is Qiskit-based and
+   was kept only as the Phase-0-era reference, not reused here): learned
+   per-institution query/key parameter vectors (independent of `x`,
+   3 params each for `n_a=2`) build `|q_i>`, `|k_j>`; `F_ij =
+   |<q_i|k_j>|^2`; `A = softmax(lambda F)` (`torch.softmax` is exactly the
+   original `exp(lam F)/sum` formulation, verified algebraically
+   equivalent, cleaner to implement). `x_tilde_i = sum_j A_ij (r_j x_j)`.
+6. MLP head on `[r_i ; x_tilde_i]` -> `p_hat_i`.
+
+`alpha`, `beta`, `gamma`, `tau0` are learnable (softplus-constrained `>=0`)
+rather than fixed at their `configs/main.yaml` values of 1.0 -- more
+principled (the model calibrates how much weight topology vs. local risk
+vs. macro gets) and those config values are used only as the initial point.
+`cqgt/hamiltonian.py::normalized_laplacian` is reused as-is for the fixed
+(non-learnable, data-derived) Laplacian per snapshot; fixed a real
+`RuntimeWarning: divide by zero` there (isolated-node edge case, already
+correctly handled via `np.where` but still evaluating the division eagerly)
+while wiring it in, since this file is now actively in the hot path rather
+than deferred.
+
+**Edge set is fixed per dataset, computed once from any snapshot.**
+Verified this is safe: real-anchor panels interpolate positive anchor
+weights and apply one shared multiplicative noise scale per snapshot (never
+per-edge independent noise), so a real edge's weight can shrink but never
+flips sign; the fallback panel multiplies by a fixed binary mask every
+step. So "topology-matched ansatz" parameters (`zz_params`, and the hopping
+terms) are declared once at model construction from `W_panel[0] > 0`.
+
+### Layer-by-layer growth (`cqgt/train.py::grow_model`)
+Per BRIEF.md Sec 2.3: train `L=1`, then grow to `L=2`, then `L=3`. Shared
+(non-layer) parameters are copied directly across a growth step. Already-
+trained layers are copied as-is. Each newly-added layer is initialized as
+`N(theta*_prev_layer, (pi/10)^2)` -- centered at the most recently trained
+layer's parameters (`growth_std = pi/10`), not the very first layer.
+Verified in `tests/test_train.py` with a near-zero `growth_std` that this
+converges to an exact copy in the limit.
+
+### Performance finding: qsim is compute-bound, not call-overhead-bound
+Before running GATE 2 at the originally-planned settings (M=20 MC draws,
+30 epochs/stage), profiled a single forward+backward pass and found it
+compute-bound: cost scales close to linearly with `batch_size x n_gates`
+(measured directly: B=20 -> 0.27s, B=200 -> 2.85s, B=1440 -> 22.4s for a
+fixed toy gate count), not dominated by Python-level per-call overhead as
+initially hypothesized. This ruled out the obvious speedup (batching more
+scenarios into fewer forward calls) since total compute is conserved
+regardless of how work is chunked into calls. A real `L=3`, 26-edge,
+`N=12` forward+backward at batch=20 costs ~1.8s; at 72 training timesteps
+per epoch that is ~127s/epoch, making the originally-planned 90-epoch
+schedule (3 stages x 30 epochs) run for hours per dataset -- not tractable
+on CPU-only hardware within this project's timeframe.
+
+**Mitigation for GATE 2 (a sanity check, not final training):** initially
+reduced to `n_mc_train=4`/`epochs_per_stage=8` to get a first working
+result. The user rejected the idea of a silent scope reduction and asked
+for a written, agreed compute budget before Phase 3 -- see the negotiation
+below, which supersedes this stopgap.
+
+### Compute budget negotiation (2026-08-11), before Phase 3
+
+User required: profile honestly first, apply optimizations in a specific
+order, then report a wall-clock projection for the full Phase 3 sweep
+*before* starting it, with an explicit "come back to me" trigger at ~6
+hours rather than a unilateral cut. Hard rule: cut seeds/variants, never
+epochs below what the GATE 2 curve shows is needed (an undertrained CQGT
+losing to a fully-trained GCN would be a false negative, worse than no
+result).
+
+**Step 1 -- complex64.** `cqgt/qsim.py`'s `CDTYPE` switched from
+`complex128` to `complex64` (paired `RDTYPE = float32` for angle tensors).
+Re-ran `tests/test_qsim.py` against Qiskit's `complex128` Statevector
+before touching the tolerance: measured max amplitude error **2.2e-7**, max
+`<Z>` error **5.4e-7** (n=2..5 qubits, 4 seeds, mixed RY/hopping/RZZ/RZ
+circuits) -- matches the ~1e-7 expected from complex64's precision.
+`ATOL` loosened `1e-6 -> 1e-5` (an order of magnitude above the measured
+worst case) with the measured numbers written into the test docstring, not
+just the change. One test (`test_hopping_conserves_total_z`) had a
+hardcoded `dtype=torch.float64` comparison that broke under the dtype
+switch -- fixed to compare against a tensor of matching dtype instead of a
+literal. **63 tests still pass.**
+
+Measured speedup: **~1.2-1.4x** (mindensity L3: 1.77s -> 1.34s), not the
+~2x hoped for -- reported as measured, not assumed. Model-level overhead
+(Python loops over edges/qubits building small `U` matrices, `movedim`
+calls) doesn't shrink with precision, diluting the gain from the actual
+tensor-math speedup.
+
+**Step 2 -- vectorization check.** Confirmed by direct code inspection: no
+Python loop over the batch dimension exists anywhere in `cqgt/qsim.py` --
+every gate (`ry`, `rz`, `rzz`, `rxx`, `ryy`) applies via a single
+`torch.einsum` call across the full `(batch, ...)` tensor. No fix needed.
+(The Python loops that do exist, in `cqgt/model.py`'s forward pass, are
+over edges and qubits -- small fixed counts per architecture, not the
+batch/MC-draw dimension, and are not resolvable by vectorization without a
+deeper circuit-parallelization rewrite that was out of scope here.)
+
+**Profiled seconds/epoch at full M=20 (72 train timesteps/epoch),
+complex64, measured directly:**
+
+| Dataset | edges (of 132 possible) | L1 | L2 | L3 | sum |
+|---|---|---|---|---|---|
+| mindensity | 24-41 (varies by t) | 41.8s | 67.8s | 96.7s | 206.3s |
+| fallback | 26 (constant) | 43.7s | 73.8s | 105.3s | 222.8s |
+| maxent | **132 (constant, every t)** | 234.7s | 327.8s | 426.7s | **989.2s** |
+
+**Discovery: maxent is a complete directed graph at every single snapshot**
+(density = 1.0000 exactly, `n_edges=132=N(N-1)` with `N=12`, confirmed
+programmatically across the whole panel, not just spot-checked) and its
+treewidth is a constant 11 = N-1 (the treewidth of the complete graph
+`K_12`) at every snapshot -- verified directly, matching the user's
+hypothesis exactly. **Mechanistic explanation, not just an empirical
+observation:** `maxent_reconstruct` initializes from `outer(assets,
+liabilities)` (strictly positive since both marginals are positive after
+rescaling) and IPF/RAS is a purely multiplicative row/column scaling --
+multiplying a positive number by a positive scale factor can never produce
+an exact zero. So maxent is *guaranteed* dense whenever the marginals are
+strictly positive, for any N, not a quirk of this particular dataset.
+mindensity, by contrast, varies genuinely: 23-41 edges (density 17.4-31.1%),
+treewidth 3-6. Fallback's edge *set* is constant by construction (only
+weight magnitudes evolve, see Phase 1) at 26 edges (19.7% density),
+treewidth constant 3.
+
+**Consequences, to state plainly in the paper (§IV):**
+- A complete graph carries no structural information for a model to
+  exploit -- every node's topological neighborhood is identical (all other
+  N-1 nodes), so message-passing/attention over it is not meaningfully
+  different from a fully-connected default. This is the leading explanation
+  for maxent's lowest GATE 1 spillover share (10.5% of positives) and
+  smallest margin (+0.031) among the three variants -- not a weaker model,
+  a structurally uninformative graph.
+- Maxent's constant treewidth=11 makes it **degenerate for the entanglement-
+  entropy-vs-treewidth study (F3)** -- there is no treewidth variation to
+  correlate against. **Maxent is excluded from that specific analysis**;
+  mindensity (treewidth 3-6, real variation) and the fallback (guaranteed
+  tw>=3 by construction) carry that study.
+- "Maximum-entropy reconstruction is structurally degenerate at N=12" is
+  reported as a legitimate finding about the method (consistent with
+  Anand/Craig/von Peter's framing of maxent as the smooth, contagion-
+  under-estimating bracket -- here shown to be smooth to the point of
+  carrying no graph structure at all at this N), not a defect in this
+  project's pipeline.
+- Realized edge count and density for all three variants (table above) will
+  be reported in the paper as a matter of course, not just in this log.
+
+**Step 3 -- ablations scope.** Per BRIEF.md Sec 2.5 and standard practice,
+confirmed with the user: the 7 ablations run on mindensity only (the
+ablation-primary dataset -- clearest GATE 1 margin, genuinely variable
+topology, more contagion-prone per Anand/Craig/von Peter's framing). The
+3-variant sweep (maxent/mindensity/fallback) applies to the main baseline
+table (T1) only.
+
+**Step 4 -- seed budget (revised down from the user's original 10):** main
+table gets **10 seeds on mindensity, 5 on maxent, 5 on fallback**; ablations
+get **5 seeds on mindensity only**. Every results table states its seed
+count explicitly.
+
+**Wall-clock projection, CQGT training only, before starting anything
+(FIRST DRAFT):**
+
+| E (epochs/stage) | Main table (10+5+5 seeds) | Ablations (7x5 seeds, mindensity) | Total |
+|---|---|---|---|
+| 20 | 45.1 hrs | 40.1 hrs | 85.2 hrs |
+| 5 | 11.3 hrs | 10.0 hrs | 21.3 hrs |
+| 1 (too few to trust) | 2.3 hrs | 2.0 hrs | 4.3 hrs |
+
+Over the ~6 hour cap at any realistic epoch count, driven overwhelmingly by
+maxent (5 seeds of maxent cost as much as ~24 seeds of mindensity). This
+does not yet include BRIEF.md Sec 2.4's other N=12 quantum-circuit
+baselines (generic hardware-efficient VQC, topology-matched VQC without the
+Hamiltonian), which are the same simulation-cost class as CQGT and would
+add further to this total.
+
+**>>> VOID, superseded below.** These per-epoch numbers (the "Profiled
+seconds/epoch" table above) were extrapolated from a single isolated
+forward+backward call x72, never actually run through `train_stage`'s real
+training loop. When a real run was attempted at these settings, it hit the
+swap-thrashing bug described in the next section and never produced a
+trustworthy number. The wall-clock table above must be treated as directional
+only (it happened to be close to the post-fix real numbers for mindensity,
+~8% low, but this was not verified for fallback/maxent before the bug was
+found) -- do not cite the 85.2/21.3/4.3 hour figures without the redo below.
+
+**Pre-committed decision (recorded before evidence, mirroring the GATE 1
+pre-registration precedent), status: NOT YET APPLIED, still the standing
+rule:** if real per-epoch measurements + a real convergence-epoch-count
+determination show `E>=3` epochs/stage are needed, **cut maxent to 2 seeds
+in the main table** (not sparsify it -- the user was explicit that an
+epsilon-thresholded maxent would no longer be the maximum-entropy bracket
+that justifies the dual-reconstruction protocol in Anand/Craig/von Peter;
+fewer seeds with wider disclosed confidence intervals is the correct, much
+cheaper price instead). **The redo (real numbers, real epoch count) has not
+completed -- see HANDOFF at the top of this file and the section below.**
+
+### Swap-thrashing bug found, fixed, and verified equivalent (2026-08-11)
+
+Launched the convergence run implied above (mindensity, full M=20, 20
+epochs/stage) to get real numbers. It ran for **2+ hours** without
+producing a single epoch of output, against a ~70min estimate. Diagnosed
+before assuming it was "just slow": `ps` showed the process alive but
+`vm_stat`/`sysctl vm.swapusage` showed **17.5GB of 18GB total swap in use**
+and **>1.079 billion translation faults** on the process -- genuine memory
+thrashing, not merely slow arithmetic.
+
+**Root cause:** the original `train_stage` (`cqgt/train.py`) built one
+computation graph spanning all `len(train_t)` (~72) timesteps' forward
+passes -- appending each timestep's loss tensor to a Python list -- before
+calling `torch.stack(losses).mean().backward()` once per epoch. This holds
+~72x one timestep's graph in memory simultaneously before releasing any of
+it. Peak memory exceeded physical RAM and the OS started swapping, and
+swap I/O is orders of magnitude slower than the arithmetic itself, which is
+why wall-clock blew up far more than raw FLOP count would predict.
+
+**Fix:** changed to per-timestep `backward()` with gradient accumulation --
+for each `t`, compute `loss_t = BCE(...) / n_t` and call `loss_t.backward()`
+immediately (accumulating into `.grad`), instead of stacking all losses
+first. This bounds peak memory to one timestep's graph regardless of
+`len(train_t)`. Confirmed healthy afterward: RSS ~250-450MB (vs. swap
+exhaustion before), no swap growth attributable to the process.
+
+**Verified mathematically equivalent, not assumed** (explicit instruction,
+since an unverified refactor at this point would make every downstream
+result suspect): added
+`tests/test_train.py::test_gradient_accumulation_matches_single_backward_over_stacked_mean`,
+comparing per-parameter gradients from (a) one `backward()` over
+`torch.stack(losses).mean()` and (b) `backward()` per timestep on
+`loss_t/n_t`, accumulated, on a tiny 3-timestep/2-layer toy case with two
+`deepcopy`-identical models. **Matched to atol=1e-6, rtol=1e-5 on every
+parameter.** This is expected (no BatchNorm or other cross-example shared
+state exists in `CQGTModel`, so linearity of differentiation guarantees
+sum-of-grads == grad-of-sum exactly, up to floating-point rounding) but was
+checked, not assumed. **64 tests pass** (63 + this one).
+
+### Real (post-fix, non-extrapolated) per-epoch measurements
+
+Measured by actually running `train_stage` for 2-3 real epochs and timing
+the wall-clock, not extrapolating from one isolated call:
+
+| Dataset | edges | L1 | L2 | L3 |
+|---|---|---|---|---|
+| mindensity | 24 | **44.4s** (measured, 3 epochs) | **75.7s** (measured, 3 epochs) | **102.5s** (measured, 3 epochs) |
+| fallback | 26 | **48.6s** (measured, 2 epochs) | **77.4s** (measured, 2 epochs) | not yet measured -- job in flight, see HANDOFF |
+| maxent | 132 | not yet measured -- job in flight, see HANDOFF | not yet measured | not yet measured |
+
+mindensity's real numbers are close to (about 8% above) the original
+extrapolated estimate (206.3s vs. real 222.6s summed L1+L2+L3) -- the
+compute-cost extrapolation itself was roughly sound; the actual danger was
+specifically the accumulation bug causing thrashing when the loop was
+really executed, which a single-call extrapolation could never have caught.
+**fallback L3 and all of maxent's real numbers are NOT YET MEASURED** --
+the background job computing them (`b8oe1frk3`) was still running when this
+session's context ran out. Partial output is on disk at
+`/private/tmp/claude-501/-Users-tripti-Deakin-QML/5f0bd0b4-db9a-4199-be07-0b00e314cd60/tasks/b8oe1frk3.output`
+but that path is unlikely to survive into a new session/machine state --
+**treat as informational only; re-run the profiling command in the new
+session** (see HANDOFF).
+
+### Flat loss curve observed -- LR-normalization hypothesis, NOT YET INVESTIGATED
+
+The first real 3-epoch-per-stage run (mindensity, M=20, used for the timing
+measurement above) produced this loss curve:
+```
+L=1: 1.27000 -> 1.26830 -> 1.26710
+L=2: 1.26340 -> 1.26180 -> 1.26090   (warm-started from L=1's endpoint)
+L=3: 1.26330 -> 1.26170 -> 1.26070   (warm-started from L=2's endpoint)
+```
+Movement per epoch is small (~0.001-0.002), and only 3 epochs/stage were
+run, so **it is not yet known whether this is a near-plateau or just slow
+movement that would continue meaningfully over more epochs.** A 20-epoch,
+L=3-only run (`bg5fo3lm5`, mindensity, no layer growth -- isolating the
+convergence question from the growth schedule) was launched to get a real
+answer but had produced **zero output** when this session's context ran
+out (est. ~34 min needed at the measured 102.5s/epoch rate for L=3; check
+`/private/tmp/claude-501/-Users-tripti-Deakin-QML/5f0bd0b4-db9a-4199-be07-0b00e314cd60/tasks/bg5fo3lm5.output`,
+though as above this path may not survive into a new session).
+
+**Hypothesis, not yet confirmed either way:** `train_stage` divides each
+timestep's loss by `n_t` (~72) before `backward()`, so the accumulated
+gradient is a *mean* over timesteps (verified mathematically identical to
+the original mean-based approach, see the equivalence test above -- this is
+NOT a bug). But combined with a fixed `lr=0.01` and
+`grad_clip_norm_=1.0` applied to the *accumulated* (summed-then-implicitly-
+averaged) gradient, the effective step size per epoch may be small enough
+that many more than 3, or even 20, epochs are needed to see real movement --
+or alternatively gradient clipping could be biting harder than intended on
+the accumulated norm. **Next session should**: (1) read the 20-epoch curve
+once available and look for a plateau vs. continued descent, (2) if still
+inconclusive, try training with grad clipping disabled or a higher LR on a
+short run to see if the loss moves faster, to distinguish "genuinely
+converging slowly, needs a real epoch budget" from "training dynamics are
+mis-tuned, needs an LR/clipping fix" -- these have very different
+implications for the epochs-per-stage budget decision.
+
+### GATE 2 status: NOT YET PASSED -- blocked on the items above
+
+GATE 2 requires: training loss decreases monotonically-ish over epochs;
+CQGT beats the prevalence floor on validation; report the learning curve.
+**None of this has been honestly demonstrated yet.** Timeline of attempts:
+1. An ad hoc stopgap (`n_mc_train=4`, `epochs_per_stage=8`, all 3 dataset
+   variants) was launched, then killed unfinished (produced zero output)
+   when the compute-budget conversation started -- never used for anything.
+2. A proper attempt (mindensity, full M=20, 20 epochs/stage) hit the
+   swap-thrashing bug above and was killed after 2+ hours with zero output.
+3. Post-fix, only short (2-3 epoch) timing runs and one in-flight 20-epoch
+   convergence run have been done -- none constitute a full GATE 2 pass
+   (need the actual layer-growth schedule L=1->2->3 run to completion, loss
+   curve inspected, and validation AUPRC compared to prevalence).
+
+**GATE 2 must be re-run properly, on the real epochs-per-stage budget once
+determined, before it can be reported as passed.** This is explicitly
+required by the user, not an oversight to skip past.
