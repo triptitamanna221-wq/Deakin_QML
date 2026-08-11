@@ -367,7 +367,7 @@ power (larger T, multiple shock realizations per snapshot), or moving to a
 continuous risk-score target instead of a binary threshold label at this
 sample size.
 
-### GATE 1 status: reported as a critical negative finding, project paused for user decision.
+### GATE 1 status (original single-draw design): reported as a critical negative finding, project paused for user decision. Superseded below by the refined MC result.
 `pytest -q` → 51 passed (Phase 0's 28 + 23 new Phase 1 tests). All Phase 1
 infrastructure (loader, panel selection, reconstruction, fallback, temporal
 panel, macro factors, features, cascade, splits, GATE 1 script) is built,
@@ -406,3 +406,64 @@ before the refined numbers exist, specifically to prevent iterating on the
 label design until a comparison happens to look favorable.
 
 ### GATE 1 refined result (M=20 Monte Carlo shock draws, spillover-only metric)
+
+Implementation: `cqgt/data/cascade.py::generate_mc_labels_for_panel` draws
+M=20 independent Bernoulli(p_shock) shock realizations per snapshot t
+(same tuned `p_shock` as the original single-draw run, same network/features
+per t, different random shocked set each draw), producing 120×20=2400
+scenario-examples instead of 120. A 7th feature — "shocked this draw"
+(binary) — is appended to the 6-dim standardized feature vector for both
+models. `scripts/run_gate1_mc.py` trains logistic regression and the same
+quick 2-layer GCN architecture on all training-split scenario-examples, and
+evaluates AUPRC restricted to nodes where `shocked_this_draw=0` in the test
+split (the spillover subset) — confirmed necessary: on the *full* node set,
+logreg alone hits AUPRC 0.78–0.92 purely from the shock indicator feature
+(directly-shocked banks fail deterministically under `shock_frac=1.0`),
+which would have masked any real model comparison.
+
+| Dataset | spillover prevalence | AUPRC logreg (spillover) | AUPRC GCN (spillover) | margin |
+|---|---|---|---|---|
+| real, maxent | 0.0296 | 0.1232 | 0.1538 | **+0.0306** |
+| real, mindensity | 0.0248 | 0.0790 | 0.1266 | **+0.0477** |
+| fallback (core-periphery) | 0.0474 | 0.1038 | 0.1113 | **+0.0075** |
+
+3-seed robustness check (GCN weight-init seed varied, same MC-drawn labels):
+mindensity margin 0.048–0.058, fallback margin 0.0075–0.0084 — consistently
+positive, not a single-seed fluke.
+
+**Pre-registered stopping rule outcome: the GCN beats logistic regression on
+the spillover subset for all three dataset variants.** The condition for
+accepting the negative finding (GCN does not beat logreg) did not occur, so
+per the rule recorded above, this is treated as a pass and the project
+proceeds to Phase 2. mindensity shows the clearest, most reliable margin
+(consistent with it being the more contagion-prone reconstruction, per the
+direct/spillover positive-label composition in the original GATE 1 run);
+the fallback network's margin is real but the smallest of the three,
+despite having the highest raw count of spillover-positive labels — worth
+noting in the paper as a secondary, unexplained observation rather than
+over-interpreting.
+
+**Honesty notes for the paper (§IV, §V):** (1) the spillover-only metric is
+the scientifically correct primary comparison and should be reported as
+such, with the all-node AUPRC reported alongside only as a sanity check,
+clearly labeled as inflated by the deterministic direct-shock component;
+(2) the "shocked this draw" feature is a scenario input available to every
+model equally, not a form of leakage, but it does mean the reported task is
+"given a known stress scenario and the network, predict contagion," not
+"predict which bank gets hit," which should be stated explicitly in the
+methodology section; (3) M=20 Monte Carlo draws per snapshot reuse the same
+120 real/interpolated network states 20 times each with different random
+shock targets — they increase statistical power for estimating the
+spillover relationship but do not add new independent network structure,
+consistent with the earlier finding that only 4 real annual anchors exist.
+
+### GATE 1 status: PASS (via the pre-registered MC refinement)
+`pytest -q` → 53 passed. GCN beats logistic regression on the spillover
+subset for all three dataset variants, holding up over a 3-seed check.
+Proceeding to Phase 2 per the user's decision, with the honesty notes above
+carried into the paper. Reproduce with:
+```
+source .venv/bin/activate
+python3 scripts/run_gate1.py      # original single-draw diagnostics
+python3 scripts/run_gate1_mc.py   # refined M=20 MC / spillover-only result
+```

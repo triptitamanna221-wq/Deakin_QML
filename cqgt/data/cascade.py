@@ -129,6 +129,51 @@ def generate_labels_for_panel(W_panel, y832_panel, m362_panel, shock_frac=DEFAUL
     return y, loss_frac, diagnostics
 
 
+def generate_mc_labels_for_panel(W_panel, y832_panel, m362_panel, shock_frac=DEFAULT_SHOCK_FRAC,
+                                  p_shock=0.08, capital_ratio=DEFAULT_CAPITAL_RATIO,
+                                  loss_threshold=DEFAULT_LOSS_THRESHOLD, seed=0, n_mc=20):
+    """Like generate_labels_for_panel, but draws `n_mc` INDEPENDENT shock
+    realizations per snapshot t, each kept as a separate scenario-example
+    rather than being the only draw for that t. This is the statistical-
+    power refinement from the GATE 1 negative finding (see NOTES.md): more
+    independent (t, mc) examples to estimate whether the network carries a
+    real (if small) spillover signal, without changing the underlying
+    exogenous-shock design (no leakage risk -- see NOTES.md's discussion of
+    why Option 3, correlating shock probability with network position, was
+    explicitly rejected).
+
+    Returns y, loss_frac, shocked_mask, all shape (T, n_mc, N), plus
+    diagnostics. shocked_mask is the scenario input (which banks were hit
+    this draw) and is meant to be fed to the model as a feature -- it is
+    not part of the outcome being predicted."""
+    T, n = y832_panel.shape
+    y = np.zeros((T, n_mc, n), dtype=int)
+    loss_frac = np.zeros((T, n_mc, n))
+    shocked_mask = np.zeros((T, n_mc, n), dtype=bool)
+    n_direct_pos, n_spillover_pos, n_shocked_total = 0, 0, 0
+    for t in range(T):
+        for m in range(n_mc):
+            rng = np.random.default_rng((seed, t, m))
+            shocked = np.where(rng.random(n) < p_shock)[0]
+            n_shocked_total += len(shocked)
+            if len(shocked) == 0:
+                continue
+            yt, lf, _, _ = run_cascade(W_panel[t], y832_panel[t], m362_panel[t], shocked,
+                                        shock_frac, capital_ratio, loss_threshold)
+            y[t, m], loss_frac[t, m] = yt, lf
+            shocked_mask[t, m, shocked] = True
+            n_direct_pos += yt[shocked_mask[t, m]].sum()
+            n_spillover_pos += yt[~shocked_mask[t, m]].sum()
+    diagnostics = {
+        "base_rate": y.mean(),
+        "n_positive": int(y.sum()), "n_total": y.size,
+        "n_direct_positive": int(n_direct_pos), "n_spillover_positive": int(n_spillover_pos),
+        "mean_banks_shocked_per_t": n_shocked_total / (T * n_mc),
+        "n_mc": n_mc,
+    }
+    return y, loss_frac, shocked_mask, diagnostics
+
+
 def tune_p_shock(W_panel, y832_panel, m362_panel, target_range=(0.08, 0.15),
                   shock_frac=DEFAULT_SHOCK_FRAC, capital_ratio=DEFAULT_CAPITAL_RATIO,
                   loss_threshold=DEFAULT_LOSS_THRESHOLD, seed=0, lo=0.01, hi=0.5, n_iter=25):
