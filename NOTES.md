@@ -107,3 +107,268 @@ python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
 pytest -q
 ```
+
+---
+
+## Phase 1 — Data (2026-08-11)
+
+### Real data provenance
+User supplied 5 real FFIEC FR Y-15 "Snapshot Indicators" CSVs (year-end
+2020–2024, `data/raw/fry15/`) and 6 real FRED series CSVs (`data/raw/fred/`).
+An earlier automated fetch attempt (not run by this session) had left
+Cloudflare CAPTCHA-challenge HTML pages saved with a `.csv` extension in
+`data/raw/fry15/`; those were deleted before the real files were added. The
+FRED files were legitimate on first inspection (proper `observation_date,
+SERIES_ID` FRED export format, real historical values).
+
+### Constraint 1 — select by column name; per-year mnemonic table
+FR Y-15 "Snapshot Indicators" reports every G-SIB indicator item three
+times, under prefixes `RISK*`/`RISI*`/`RISO*` — one populated block per
+reporting population (top-tier US BHC, US intermediate holding company of a
+foreign banking organization, or the foreign parent). Exactly one block is
+populated per institution-year (one filer, Discover Financial Services in
+the 2023 file, explicitly entered `0` rather than leaving the other two
+blocks blank — handled as "populated" meaning non-null AND non-zero, not
+just non-null, in `cqgt/data/fry15_loader.py::_coalesce_block`).
+
+Column names, order, and even which fields exist drift every single year.
+Explicit per-year map (`cqgt/data/fry15_loader.py::YEAR_COLUMN_MAP`), values
+are the base column name before the RISK/RISI/RISO prefix:
+
+| Year | id col | name col | date col | m362 (assets) | m370 (liabilities) | y832 (size) | extra fields (m376,m390,m405,m408,m411,m422,m426) |
+|---|---|---|---|---|---|---|---|
+| 2020 | `ID_RSSD` | `NAME` | `DT` | `M362` | `M370` | `Y832` | present |
+| 2021 | `ID_RSSD` | `Name (Legal)` | `DT` | `M362` | `M370` | `Y832` | present |
+| 2022 | `ID_RSSD` | `Name (Legal)` | `DT` | `M362` | `M370` | `Y832` | present |
+| 2023 | `ID_RSSD` | `NAME` | `AsOfDate` | `M362` | `M370` | `Y832` | present |
+| 2024 | `ID_RSSD` | `Name` | `As of Date` | **absent** | `M370` | `Y832` | present |
+
+Field semantics used (identified from BRIEF.md's own naming plus standard
+Basel/FSB G-SIB indicator ordering, cross-checked against known bank sizes —
+e.g. RISKY832 for JPMorgan ≈ $4.4T, matching its known total leverage
+exposure): `M362`=Intra-Financial-System Assets, `M370`=Intra-Financial-
+System Liabilities, `Y832`=Total Exposures (G-SIB size indicator, leverage-
+ratio denominator). `Y896`/`Y862` (present in 2020 and 2024 only) could not
+be confidently identified and are unused. Two files also carry a literal
+mojibake BOM (`ï»¿`) baked into the first header cell as text, not a real
+UTF-8 BOM byte — stripped explicitly in `_strip_bom_prefix`.
+
+**2024 structurally omits M362** (0 of 45 columns match "M362", verified by
+direct grep, vs 3 of N in every other year — not a per-institution gap, the
+field does not exist in that year's export). Flagged to the user before
+building anything downstream; they chose (over carrying forward 2023's value
+or relaxing the completeness rule to M370-only) to **drop 2024 as a network-
+reconstruction anchor** and keep only its available real fields (`m370`,
+`y832`, and the 7 extra indicator items) as potential future feature
+inputs. **Network reconstruction therefore rests on 4 real annual anchors
+(2020–2023), not 5.** This must be stated plainly in the paper (§IV-A).
+
+### Constraint 2 — N=12 panel selection: no imputation
+Rule: among the 4 real anchor years, keep institutions with BOTH `m362` and
+`m370` populated in **all four** years, rank by mean Total Exposures
+(`Y832`), take the largest 12. An institution missing any anchor year is
+excluded outright, not filled in — see `cqgt/data/panel.py`.
+
+- 48 institutions had complete M362+M370 data across all 4 anchor years.
+- **JPMorgan Chase & Co. is rank 1** ($4.44T mean Y832) — the rule does not
+  drop it, so no rule change was needed.
+
+**Included (rank, institution, mean Y832 $thousands):**
+1. JPMorgan Chase & Co. — 4,442,716,925
+2. Bank of America Corporation — 3,583,365,900
+3. Citigroup Inc. — 2,952,041,175
+4. Wells Fargo & Company — 2,283,341,638
+5. Goldman Sachs Group, Inc. — 1,833,568,900
+6. Morgan Stanley — 1,432,549,425
+7. U.S. Bancorp — 742,806,800
+8. Toronto-Dominion Bank, The — 652,600,660
+9. PNC Financial Services Group, Inc. — 637,734,666
+10. Truist Financial Corporation — 628,018,900
+11. TD Group US Holdings LLC — 562,842,522
+12. Charles Schwab Corporation, The — 557,232,925
+
+**Excluded as too small:** 36 institutions with complete data but rank
+13–48 (largest excluded: Capital One Financial Corporation, rank 13).
+
+**Excluded for incomplete data (12 institutions) — real M&A/failure churn,
+not a data bug:** SVB Financial Group and First Citizens Bancshares (SVB
+collapsed 2023, First Citizens absorbed its assets and only became a Y-15
+filer that year), Credit Suisse Group AG / Credit Suisse AG (acquired by
+UBS in 2023), BBVA USA Bancshares / Banco Bilbao Vizcaya Argentaria (BBVA
+USA acquired by PNC in 2021), Flagstar Financial (renamed/restructured;
+only present 2023+), CIBC Bancorp USA / Canadian Imperial Bank of Commerce,
+MUFG Americas Holdings, Synchrony Financial, BPCE — each present in only
+1–3 of the 4 anchor years.
+
+**Limitation disclosed for §V:** the panel includes one parent/subsidiary
+pair — Toronto-Dominion Bank, The (rank 8, the Canadian parent) and TD
+Group US Holdings LLC (rank 11, its US intermediate holding company) — as
+two distinct RSSD filers. This is how FR Y-15 legally structures them, but
+if intra-TD-group US–Canada exposures are a material share of either
+entity's M362/M370, this could inflate the *apparent* interconnectedness
+between these two specific nodes relative to two fully independent banking
+groups. Disclosed, not hidden; not corrected for.
+
+### Constraint 3 — marginal imbalance: explicit, not silently unconverged
+Sum(assets) ≠ sum(liabilities) for the 12-bank panel every year, because
+each institution's FR Y-15 figures include claims on/obligations to
+counterparties outside the panel. **Decision: proportionally rescale both
+vectors to their common average total** (`cqgt/data/reconstruction.py::
+rescale_marginals`), not a rest-of-world node — simpler, and IPF then has a
+feasible balanced problem by construction. Measured imbalance before
+rescaling (assets > liabilities every year — the panel's very largest banks
+are net lenders within the reported financial system):
+
+| Year | Σ assets ($k) | Σ liabilities ($k) | Imbalance |
+|---|---|---|---|
+| 2020 | 1,518,734,288 | 1,386,575,102 | 9.1% |
+| 2021 | 1,635,444,078 | 1,260,191,470 | 25.9% |
+| 2022 | 1,660,551,737 | 1,281,775,357 | 25.7% |
+| 2023 | 1,783,456,252 | 1,342,869,800 | 28.2% |
+
+Both `maxent_reconstruct` (RAS/IPF) and `mindensity_reconstruct` (greedy
+fewest-links, in the spirit of Anand/Craig/von Peter 2015 — not their exact
+LP formulation, disclosed in the docstring) converge to the rescaled
+marginals to floating-point precision (`tests/test_reconstruction.py`). The
+greedy mindensity algorithm needed two non-obvious fixes to converge exactly
+rather than stranding ~0.03% of the flow: (1) when the largest remaining
+lender's only counterparty would be itself, fall through to the
+next-largest lender instead of aborting the whole pass; (2) resolve any
+genuinely self-referential residual with a 3-edge transportation-simplex
+pivot through an existing edge elsewhere in the network, which leaves every
+other institution's own marginals exactly untouched.
+
+### Constraint 4 — temporal honesty: T=120 is synthetic structure on real anchors
+FR Y-15 is annual. **The panel's 120 "weekly" snapshots are NOT 120 real
+observations.** `cqgt/data/temporal.py::build_real_anchor_panel` places the
+4 real annual network anchors at evenly-spaced indices (t=0, 40, 79, 119 for
+T=120) and linearly interpolates the reconstructed exposure matrix and
+marginals between them, then overlays a common AR(1) multiplicative noise
+path (ρ=0.95) with variance tripled inside the crisis window (t∈[70,85]).
+**Only the 4 anchor weeks are real data; every other week's network is a
+disclosed interpolation + noise fabrication.** The macro factors (§ below)
+are looked up against a synthetic calendar (linearly spaced dates between
+the first and last anchor's real dates) but the FRED *values* returned for
+those dates are genuinely real, as-of/forward-filled. **This must be stated
+plainly in §IV-A**: real annual cross-section, synthetic weekly interpolation
+overlay — not a real weekly panel.
+
+### Feature construction — 4 of 6 features are disclosed proxies
+FR Y-15 has no capital/equity or market-price data, so it cannot supply a
+literal leverage ratio, Tier-1 ratio, CDS spread, or liquidity ratio.
+`cqgt/data/features.py` builds:
+- `size_proxy` ("leverage" slot) = Y832 (total exposure) — a size proxy, not
+  a real leverage ratio.
+- `complexity_proxy` ("Tier-1" slot) = M411 (OTC derivatives notional) / Y832.
+- `funding_proxy` ("CDS-proxy" slot) = M376 (securities outstanding,
+  wholesale funding) / Y832.
+- `liquidity_proxy` = M390 (payments activity) / Y832.
+- `out_degree` = real, from the reconstructed network's row sums.
+- `macro_breadth_proxy` ("macro sensitivity" slot) = (M422+M426, cross-
+  jurisdictional claims+liabilities) / Y832, in place of an empirically
+  estimated β against C_t (only 4 annual points exist; a regression beta
+  would be unreliably noisy at that sample size).
+All z-scored using **training-split statistics only**, then `arctan`, per
+BRIEF.md §2.1.
+
+### Eisenberg–Noe cascade — calibration story (important, read before Phase 2)
+`external_assets[i] = Y832[i] - M362[i]` (real, FR Y-15-derived). `equity[i]
+= capital_ratio × Y832[i]` with `capital_ratio=0.08` — **assumed**, a
+literature-typical G-SIB leverage-ratio buffer, not a measured figure for
+any institution (FR Y-15 reports no capital data at all).
+
+**Finding during calibration, not a bug:** for these 12 real large banks,
+external assets are 7×–180× their interbank liabilities L (they fund mainly
+outside the interbank market — realistic for G-SIBs). An Eisenberg-Noe
+*payment* shortfall — the only channel through which one bank's shock can
+reach another's equity — therefore requires shocking a bank's external
+assets almost to zero; partial haircuts (5–50%) wipe out the thin assumed
+8% equity buffer on paper (crossing any reasonable loss threshold) without
+ever causing an actual missed interbank payment, so they produce **zero
+spillover by construction**, not by bug. Verified directly: a 90% haircut
+on one bank still causes exactly 0.000 loss for every counterparty; a 98%
+haircut starts producing real spillover (0.16–0.52 loss fractions for
+directly-exposed creditors). **Final design: `shock_frac=1.0`** (a shocked
+bank's external assets are fully wiped — modeling a genuine failure event,
+not a partial haircut), each bank independently shocked with probability
+`p_shock` each period (Bernoulli, seeded per-(seed,t)), `p_shock` tuned by
+bisection search per dataset variant to hit the 8–15% target base rate
+(`cqgt/data/cascade.py::tune_p_shock`).
+
+Tuned values and resulting composition (full T=120×N=12=1440-label panel):
+
+| Dataset | p_shock (tuned) | base rate | direct positives | spillover positives |
+|---|---|---|---|---|
+| real, maxent | 0.1019 | 11.25% | 145 | 17 (10.5% of positives) |
+| real, mindensity | 0.0713 | 8.40% | 97 | 24 (19.8% of positives) |
+| fallback (core-periphery) | 0.0713 | 11.18% | 97 | 64 (39.8% of positives) |
+
+Consistent with the literature (Upper 2011; Anand/Craig/von Peter 2015):
+mindensity's concentrated exposures produce roughly 2× the spillover rate of
+maxent's smoothed-out exposures for the same shock parameters, and the
+deliberately-concentrated core-periphery fallback shows the most spillover
+of all three. This part of the pipeline is working as intended and is
+itself a legitimate, reportable empirical finding regardless of the GATE 1
+outcome below.
+
+Ground-truth counterfactuals (`cqgt/data/cascade.py::ground_truth_delta_r`):
+for each edge with W[i,j]>0, rerun the same shock+clearing with that edge
+zeroed, record ΔR = R0 − R_cf where R = mean equity-loss fraction across the
+panel. Implemented and unit-tested; not yet run at panel scale (deferred to
+Phase 3, where it's actually consumed).
+
+### GATE 1 — CRITICAL FINDING: DOES NOT PASS on any of the three dataset variants
+
+Per the explicit stop-and-report instruction: **the quick GCN does not
+clearly beat logistic regression on any of real-maxent, real-mindensity, or
+the synthetic fallback**, tested with a lightweight 2-layer GCN
+(`scripts/run_gate1.py`) trained on the same rolling 60/20/20 split
+(`cqgt/data/splits.py`, asserted in code) used for logistic regression.
+Result was re-checked over 5 seeds with more training epochs (300) to rule
+out an undertrained-model artifact — the margin stayed small and
+inconsistent (fallback: GCN beat logreg in 4/5 seeds by +0.01–0.02 but lost
+in 1/5; mindensity: GCN was on average *worse* than logreg, 0.069 vs 0.072,
+both barely above the 0.084 prevalence floor).
+
+| Dataset | prevalence | treewidth (min/max/mean) | AUPRC logreg | AUPRC GCN (1 seed) | AUPRC GCN (5-seed mean) | margin |
+|---|---|---|---|---|---|---|
+| real, maxent | 0.1125 | 11/11/11.00 | 0.1121 | 0.1144 | — | +0.0023 |
+| real, mindensity | 0.0840 | 3/6/4.95 | 0.0719 | 0.0778 | 0.0686 | −0.0033 (5-seed mean actually below logreg) |
+| fallback (core-periphery) | 0.1118 | 3/3/3.00 | 0.1201 | 0.1305 | 0.1291 | +0.0090 |
+
+(Treewidth note: maxent is fully dense — every anchor year converges to
+132/132 possible directed edges since IPF with all-positive marginals never
+produces an exact zero — so its treewidth is trivially N−1=11 at every
+snapshot; this is expected IPF behavior, not a bug, and is itself evidence
+for why the brief frames mindensity as the sparser, more contagion-prone
+reconstruction.)
+
+**My read of why:** (1) the shock target is exogenous and i.i.d. across
+banks by design (per BRIEF.md's own "apply an exogenous shock to a random
+subset" spec) — a large majority of positive labels are therefore
+intrinsically unpredictable from pre-shock state, capping achievable AUPRC
+for *any* model; (2) `out_degree` is already one of the 6 features fed to
+logistic regression, so first-order network-centrality information is not
+exclusive to the GCN — only higher-order relational structure would be its
+unique advantage, and that signal appears to be smaller than the noise
+floor at N=12, T=120, with only 97–162 total positive labels; (3) with only
+4 real network anchors, the *topology* barely varies across the 120-week
+interpolated panel (mostly smooth weight-magnitude drift between the same 4
+endpoints), leaving the GCN little independent structural variation to
+learn from across training snapshots.
+
+**This is being reported to the user now, per explicit instruction, rather
+than tuned further.** Not proceeding to Phase 2 until they decide how (or
+whether) to proceed — options on the table include accepting this as a
+disclosed null/negative finding and reframing the paper accordingly,
+redesigning the shock mechanism to correlate more with observable network
+position (with care to avoid manufacturing leakage), increasing statistical
+power (larger T, multiple shock realizations per snapshot), or moving to a
+continuous risk-score target instead of a binary threshold label at this
+sample size.
+
+### GATE 1 status: reported as a critical negative finding, project paused for user decision.
+`pytest -q` → 51 passed (Phase 0's 28 + 23 new Phase 1 tests). All Phase 1
+infrastructure (loader, panel selection, reconstruction, fallback, temporal
+panel, macro factors, features, cascade, splits, GATE 1 script) is built,
+tested, and reproducible regardless of how the labeling design evolves.
