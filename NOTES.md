@@ -291,6 +291,23 @@ for every name/phone/email pattern that had been present -- none remain.
 naming, unused" fields already disclosed in Constraint 1), no personal
 contact information.
 
+**Correction to the framing above (2026-08-14, same day):** the user
+clarified this is not a privacy remediation -- the FR Y-15 "Snapshot
+Indicators" contact fields are published by FFIEC on a public,
+unauthenticated government website as the designated public filing
+contact for a mandatory regulatory disclosure, so mirroring them here
+carried no incremental privacy exposure, and the unmodified originals
+remain publicly available from FFIEC regardless of what this repo does.
+The user explicitly declined a history rewrite for this reason (a
+rebase to scrub the columns from the commit that originally introduced
+them was proposed and then cancelled -- `ca06775`, already pushed,
+still contains the original six columns in its history, and that is
+being left as-is, deliberately, not as an oversight). The redaction
+commit (`159e256`) is kept going forward purely as tidiness -- these six
+columns are not used anywhere in this project's pipeline, so there is no
+reason for the committed copies to carry them -- not because leaving
+them was a privacy problem.
+
 ### Constraint 1 — select by column name; per-year mnemonic table
 FR Y-15 "Snapshot Indicators" reports every G-SIB indicator item three
 times, under prefixes `RISK*`/`RISI*`/`RISO*` — one populated block per
