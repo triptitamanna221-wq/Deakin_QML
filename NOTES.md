@@ -246,6 +246,51 @@ Cloudflare CAPTCHA-challenge HTML pages saved with a `.csv` extension in
 FRED files were legitimate on first inspection (proper `observation_date,
 SERIES_ID` FRED export format, real historical values).
 
+### PII redaction (2026-08-14): contact columns stripped from the committed 2024/2025 file
+
+After `data/raw/` was committed (un-ignored per the user's explicit
+instruction), the user flagged that the FR Y-15 "Snapshot Indicators"
+schema includes a certification/contact block -- and asked to check for
+and remove it before it stayed public. Checked: only
+`20241231_20250722_FRY15 Snapshot Indicators.csv` (the 2024/2025 file)
+carries it; the 2020-2023 files never had these columns under any
+RISK/RISI/RISO prefix (grepped all 5 files to confirm before touching
+anything). The six columns, and what they actually contained (verified by
+reading real values, not assumed from the mnemonic name alone):
+
+| Column | Contents (real values seen) |
+|---|---|
+| `RISKC490` | CFO name (e.g. "Jeremy Barnum") |
+| `RISKJ196` | Submission date |
+| `RISK8901` | Preparer name + title (e.g. "Elaine O'Keeffe, Managing Director") |
+| `RISK8902` | Preparer direct phone |
+| `RISK9116` | A second phone number |
+| `RISK4086` | Preparer email address |
+
+None of these are consumed anywhere in `cqgt/data/fry15_loader.py` --
+`YEAR_COLUMN_MAP` never references them, so removal is a pure redaction
+with zero effect on any pipeline output, verified by re-running the full
+test suite (`pytest -q`, 79 passed unchanged) after the edit.
+
+**Mechanics, to keep provenance honest about exactly what changed:** wrote
+a one-off Python script (not saved -- run once, ad hoc) that parsed the
+file with `csv.reader`, dropped columns by exact header-name match (all
+three RISK/RISI/RISO variants of the six mnemonics, though only the
+RISK-prefixed ones were actually present), and rewrote with `csv.writer`.
+Verified byte-for-byte afterward that nothing else changed: the file's
+leading mojibake pseudo-BOM (`ï»¿`, three real UTF-8 characters baked into
+the first header cell as text -- see Constraint 1 below, this is NOT a
+real BOM byte and `_strip_bom_prefix` depends on it looking exactly like
+this) is preserved exactly; row count unchanged (54); line endings
+unchanged (bare `\n`, no `\r\n` introduced); every remaining column's data
+untouched, only re-ordered by the removal (financial columns keep their
+relative order, contact columns spliced out). Grepped the rewritten file
+for every name/phone/email pattern that had been present -- none remain.
+`data/raw/fry15/` now carries only the FR Y-15 financial indicator fields
+`YEAR_COLUMN_MAP` actually uses (plus the small set of "identified from
+naming, unused" fields already disclosed in Constraint 1), no personal
+contact information.
+
 ### Constraint 1 — select by column name; per-year mnemonic table
 FR Y-15 "Snapshot Indicators" reports every G-SIB indicator item three
 times, under prefixes `RISK*`/`RISI*`/`RISO*` — one populated block per
