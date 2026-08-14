@@ -1,0 +1,5 @@
+table,model,seed,n_edges_pooled,spearman_rho,precision_at_10
+T3,cqgt_full,0,33,0.0184788669198413,0.4
+T3,gcn_gradient_saliency,0,33,-0.4571510990169443,0.3
+T3,cqgt_full,1,33,0.016892300177617,0.4
+T3,gcn_gradient_saliency,1,33,-0.6677426893740388,0.6

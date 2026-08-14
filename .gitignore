@@ -5,5 +5,4 @@ __pycache__/
 .pytest_cache/
 *.npz
 *.npy
-data/raw/
 data/panel.npy

@@ -57,6 +57,52 @@ def test_n_parameters_matches_state_dict_scalar_count():
     assert model.n_parameters() == expected
 
 
+def test_no_hamiltonian_ablation_runs_and_differs():
+    n, F = 4, 5
+    W, edges = _toy_setup(n, F)
+    torch.manual_seed(0)
+    full = CQGTModel(n_qubits=n, n_features=F, edges=edges, n_layers=2, n_macro=3)
+    torch.manual_seed(0)
+    ablated = CQGTModel(n_qubits=n, n_features=F, edges=edges, n_layers=2, n_macro=3,
+                         use_hamiltonian=False)
+    x = torch.randn(3, n, F)
+    macro_t = torch.randn(3)
+    p_full = full(x, W, macro_t)
+    p_ablated = ablated(x, W, macro_t)
+    assert p_ablated.shape == (3, n)
+    assert not torch.allclose(p_full, p_ablated)
+    # gradient should NOT reach the disabled Hamiltonian's own coefficients
+    # or its inputs (f_psi, macro_loadings) -- disclosed as dead-but-counted
+    # parameters for this ablation, not a bug.
+    loss = torch.nn.functional.binary_cross_entropy(
+        p_ablated, torch.randint(0, 2, (3, n)).float())
+    loss.backward()
+    assert ablated.alpha_raw.grad is None or ablated.alpha_raw.grad.item() == 0.0
+    assert ablated.phi.grad is not None  # the RY/RZZ variational path still trains
+
+
+def test_classical_attention_ablation_runs_and_differs():
+    n, F = 4, 5
+    W, edges = _toy_setup(n, F)
+    torch.manual_seed(0)
+    full = CQGTModel(n_qubits=n, n_features=F, edges=edges, n_layers=2, n_macro=3)
+    torch.manual_seed(0)
+    ablated = CQGTModel(n_qubits=n, n_features=F, edges=edges, n_layers=2, n_macro=3,
+                         use_quantum_attention=False)
+    assert full.n_parameters() == ablated.n_parameters()  # mechanism-only ablation
+    x = torch.randn(3, n, F)
+    macro_t = torch.randn(3)
+    p_full = full(x, W, macro_t)
+    p_ablated = ablated(x, W, macro_t)
+    assert p_ablated.shape == (3, n)
+    assert not torch.allclose(p_full, p_ablated)
+    loss = torch.nn.functional.binary_cross_entropy(
+        p_ablated, torch.randint(0, 2, (3, n)).float())
+    loss.backward()
+    assert ablated.query_params.grad is not None
+    assert torch.isfinite(ablated.query_params.grad).all()
+
+
 def test_zero_edges_does_not_crash():
     """An isolated-node edge case: n_edges=0 must not break shape handling."""
     n, F = 3, 4

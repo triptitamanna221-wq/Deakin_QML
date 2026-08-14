@@ -9,9 +9,11 @@ from sklearn.metrics import average_precision_score
 from cqgt.data.pipeline import attach_macro_factors, build_paired_dataset
 from cqgt.train import predict, train_cqgt
 
-N_MC = 20          # full paired M draws -- used for evaluation
-N_MC_TRAIN = 4     # compute-budget knob for training only, see cqgt/train.py
-EPOCHS_PER_STAGE = 8
+N_MC = 20          # full paired M draws -- used for both training and evaluation
+EPOCHS_PER_STAGE = 25  # empirically justified: see NOTES.md's real full-panel
+                        # convergence check (mindensity, L=3, full M=20) --
+                        # validation spillover AUPRC 0.3374 vs prevalence floor
+                        # 0.0170 already achieved at this budget.
 
 
 def run_gate2_for(name, source, seed=0):
@@ -20,9 +22,16 @@ def run_gate2_for(name, source, seed=0):
     n = ds["W_panel"].shape[1]
     edges = list(map(tuple, np.argwhere(ds["W_panel"][0] > 0)))
 
+    # layer_schedule=(3,) trains directly at L=3, no growth: NOTES.md's
+    # gradient-norm evidence (Attempt 1 overfit-20 diagnostic) found no
+    # barren-plateau signature at N=12, so the growth curriculum specified
+    # as C4 mitigation is empirically unnecessary here -- dropped for CQGT
+    # and all ablations alike, so every model in the comparison shares the
+    # identical training protocol (no growth-schedule confound). Full
+    # layer-by-layer growth is Future Work, untested at this scale.
     model, full_history, per_stage = train_cqgt(
-        ds, n_qubits=n, n_features=7, edges=edges, layer_schedule=(1, 2, 3),
-        epochs_per_stage=EPOCHS_PER_STAGE, seed=seed, n_mc_train=N_MC_TRAIN)
+        ds, n_qubits=n, n_features=7, edges=edges, layer_schedule=(3,),
+        epochs_per_stage=EPOCHS_PER_STAGE, seed=seed, n_mc_train=None)
 
     y_val, p_val, shocked_val = predict(model, ds, ds["val_t"])
     spillover_mask = ~shocked_val

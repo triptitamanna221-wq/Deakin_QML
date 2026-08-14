@@ -37,7 +37,14 @@ QK_DIM = 2 * N_ANCILLA - 1  # RY angles + RZZ angles for build_qk_state-equivale
 
 
 class CQGTModel(nn.Module):
-    def __init__(self, n_qubits, n_features, edges, n_layers=3, n_macro=3, hidden_dim=8):
+    def __init__(self, n_qubits, n_features, edges, n_layers=3, n_macro=3, hidden_dim=8,
+                 use_hamiltonian=True, use_quantum_attention=True):
+        """use_hamiltonian=False and use_quantum_attention=False are the
+        `no_hamiltonian` / `classical_attention` ablations (BRIEF.md Sec
+        2.5). The third ablation, `random_edges`, needs no model change --
+        it is implemented by constructing this same model with a randomly
+        generated (density-matched) `edges` list instead of the real
+        exposure topology; see experiments/run_ablation.py."""
         super().__init__()
         self.n_qubits = n_qubits
         self.n_features = n_features
@@ -45,6 +52,8 @@ class CQGTModel(nn.Module):
         self.n_edges = len(self.edges)
         self.n_layers = n_layers
         self.n_macro = n_macro
+        self.use_hamiltonian = use_hamiltonian
+        self.use_quantum_attention = use_quantum_attention
 
         self.embed = nn.Linear(n_features, 1)
 
@@ -87,8 +96,18 @@ class CQGTModel(nn.Module):
         """Quantum fidelity attention F_ij = |<q_i|k_j>|^2 via a 2-ancilla-
         qubit qsim circuit, batched over the n_qubits institutions (batch
         dimension here = institutions, not scenarios -- this sub-circuit
-        does not depend on x at all, only on the learned query/key params)."""
+        does not depend on x at all, only on the learned query/key params).
+
+        classical_attention ablation (use_quantum_attention=False): the
+        SAME query_params/key_params tensors are reinterpreted as plain
+        real-valued embedding vectors and scored by dot product instead of
+        being used as quantum circuit angles -- this isolates the quantum
+        vs. classical attention *mechanism* as the only difference, since
+        parameter count and shapes are otherwise identical."""
         n = self.n_qubits
+        if not self.use_quantum_attention:
+            scores = self.query_params @ self.key_params.T  # (n, n) real dot product
+            return torch.softmax(self.attn_lambda * scores, dim=1)
         sq = qsim.zero_state(n, N_ANCILLA)
         for a in range(N_ANCILLA):
             sq = qsim.ry(sq, self.query_params[:, a], a, N_ANCILLA)
@@ -108,11 +127,15 @@ class CQGTModel(nn.Module):
         A = torch.softmax(self.attn_lambda * F, dim=1)  # exp(lam F)/sum == softmax
         return A
 
-    def forward(self, x, W_t, macro_t):
-        """x: (B, n_qubits, n_features) float32 -- B scenarios sharing W_t.
-        W_t: (n_qubits, n_qubits) numpy array, this snapshot's real network.
-        macro_t: (n_macro,) tensor, this snapshot's macro factor values.
-        Returns p_hat: (B, n_qubits)."""
+    def circuit_expectation_z(self, x, W_t, macro_t):
+        """The quantum circuit's raw <Z_i> readout (BRIEF.md Sec 2.3 steps
+        1-4), before quantum/classical attention and the MLP head. Exposed
+        as its own method (not just inlined in forward()) because it is the
+        object of the 1-WL separation claim (BRIEF.md Sec 3, III-E) --
+        experiments/wl_separation.py compares THIS quantity, not the
+        post-attention/post-MLP p_hat, since the claim is about the
+        circuit's expressivity specifically, not the classical head that
+        follows it. Returns r: (B, n_qubits)."""
         B, n = x.shape[0], self.n_qubits
         edge_L = self._edge_laplacian_weights(W_t)
 
@@ -125,30 +148,44 @@ class CQGTModel(nn.Module):
         for e, (i, j) in enumerate(self.edges):
             state = qsim.hopping(state, tau0 * edge_L[e], i, j, n)
 
-        alpha = torch.nn.functional.softplus(self.alpha_raw)
-        beta = torch.nn.functional.softplus(self.beta_raw)
-        gamma = torch.nn.functional.softplus(self.gamma_raw)
-
-        f_psi_val = self.f_psi(x).squeeze(-1)  # (B, n)
-        macro_term = self.macro_loadings @ macro_t  # (n,)
-        h = beta * f_psi_val + gamma * macro_term[None, :]  # (B, n)
+        if self.use_hamiltonian:
+            alpha = torch.nn.functional.softplus(self.alpha_raw)
+            beta = torch.nn.functional.softplus(self.beta_raw)
+            gamma = torch.nn.functional.softplus(self.gamma_raw)
+            f_psi_val = self.f_psi(x).squeeze(-1)  # (B, n)
+            macro_term = self.macro_loadings @ macro_t  # (n,)
+            h = beta * f_psi_val + gamma * macro_term[None, :]  # (B, n)
 
         for l in range(self.n_layers):
             for i in range(n):
                 state = qsim.ry(state, self.phi[l, i], i, n)
             for e, (i, j) in enumerate(self.edges):
                 state = qsim.rzz(state, self.zz_params[l, e], i, j, n)
-            delta_l = self.delta[l]
-            for e, (i, j) in enumerate(self.edges):
-                state = qsim.hopping(state, alpha * edge_L[e] * delta_l, i, j, n)
-            for i in range(n):
-                state = qsim.rz(state, 2 * delta_l * h[:, i], i, n)
+            # no_hamiltonian ablation: skip e^{-i H_t delta_l} entirely (both
+            # the alpha-scaled hopping/entangling part and the beta/gamma
+            # diagonal RZ part) -- the network-contagion + macro coupling
+            # term that BRIEF.md Sec 1 flags as "the paper's central claim",
+            # ablated to test whether it's actually earning its keep beyond
+            # the CTQW encoder (step 2, still applied) and the per-layer RZZ.
+            if self.use_hamiltonian:
+                delta_l = self.delta[l]
+                for e, (i, j) in enumerate(self.edges):
+                    state = qsim.hopping(state, alpha * edge_L[e] * delta_l, i, j, n)
+                for i in range(n):
+                    state = qsim.rz(state, 2 * delta_l * h[:, i], i, n)
 
         # qsim runs in complex128 for numerical exactness (Phase 0's atol=1e-6
         # bar against Qiskit); downcast the real-valued outputs to float32
         # here so they interoperate with the classical nn.Linear layers,
         # which default to float32 weights.
-        r = qsim.expect_all_z(state, n).float()  # (B, n)
+        return qsim.expect_all_z(state, n).float()  # (B, n)
+
+    def forward(self, x, W_t, macro_t):
+        """x: (B, n_qubits, n_features) float32 -- B scenarios sharing W_t.
+        W_t: (n_qubits, n_qubits) numpy array, this snapshot's real network.
+        macro_t: (n_macro,) tensor, this snapshot's macro factor values.
+        Returns p_hat: (B, n_qubits)."""
+        r = self.circuit_expectation_z(x, W_t, macro_t)
         A = self._attention_weights().float()  # (n, n)
         h_attn = r.unsqueeze(-1) * x  # (B, n, F)
         x_tilde = torch.einsum("ij,bjf->bif", A, h_attn)  # (B, n, F)

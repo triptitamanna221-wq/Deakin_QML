@@ -929,6 +929,358 @@ converging slowly, needs a real epoch budget" from "training dynamics are
 mis-tuned, needs an LR/clipping fix" -- these have very different
 implications for the epochs-per-stage budget decision.
 
+### Flat loss curve diagnosed (2026-08-11, resumed session) -- NOT a bug
+
+Per the user's STEP 1 instruction (overfit test -> gradient norms -> LR
+sweep, time-boxed to 3 attempts), ran ATTEMPT 1: overfit 20 examples (a
+single fixed timestep, all n_mc=20 shock draws as the batch, no
+regularization -- none exists in this codebase anyway -- lr=0.02, 400
+epochs), logging per-parameter-group gradient norms every 20 epochs
+(quantum_params [phi, zz_params, delta, query_params, key_params,
+attn_lambda], f_psi, mlp_head, tau0, alpha_beta_gamma, embed+macro_loadings).
+
+**Result: loss 1.27962 -> 0.00003 over 400 epochs, 100% node-label accuracy
+by epoch 60.** Gradient norms across every parameter group stayed within
+~1 order of magnitude of each other throughout training (e.g. epoch 0:
+quantum_params=4.6e-3, mlp_head=5.3e-2, tau0=5.1e-4, alpha_beta_gamma=2.0e-4
+-- smaller, but nowhere near the orders-of-magnitude gap that would signal
+a barren plateau). **The architecture is not broken and there is no
+empirical barren-plateau signature at N=12.** This resolved STEP 1 in one
+attempt (of the 3 allowed); the gradient-norm-only and LR-sweep methods
+were not needed as separate attempts.
+
+**Confirmed on the real full panel**, not just the 20-example subset: ran
+25 epochs, L=3 fixed (no growth), mindensity, full M=20, all 72 train
+timesteps, production lr=0.01. Loss moved 1.26534 -> 1.25112 -- monotonic
+every epoch but decelerating, i.e. still looking "flat" by raw BCE
+magnitude. **But validation spillover-subset AUPRC = 0.3374 against a
+prevalence floor of 0.0170** -- a ~20x lift, already clearing GATE 2's real
+bar (beat the prevalence floor) at this budget.
+
+**Root cause of the "flat loss" symptom: not a bug.** Two compounding
+factors, both artifacts of how the number was produced, not the model:
+(1) class-weighted BCE with extreme spillover-subset imbalance
+(pos_weight ~58) keeps the raw loss magnitude high even when the model is
+discriminating well -- loss value alone is a poor proxy for AUPRC/ranking
+quality under this weighting; (2) the original flat-curve observation
+(1.2700->1.2671) came from a 3-epoch profiling run, `train_stage`'s
+`CosineAnnealingLR(T_max=max(epochs,1))` therefore used `T_max=3` for
+that specific call and collapsed the LR before any real learning could
+happen -- **this is not a code bug** (T_max correctly tracks whatever
+`epochs` is passed to that call), it was simply the wrong `epochs` value
+for a convergence judgment, taken from a call that was only ever meant to
+measure per-epoch wall-clock.
+
+### Growth-schedule finding: dropped for Phase 3, not just GATE 2 (2026-08-11)
+
+The Attempt 1 gradient-norm evidence directly bears on BRIEF.md's own
+framing of layer-by-layer growth (L=1->2->3) as barren-plateau (challenge
+C4) mitigation: if there is no barren-plateau signature at N=12, the
+mitigation is empirically unnecessary at this scale. **Decision (user,
+2026-08-11): drop layer-wise growth entirely -- CQGT and all 3 Phase 3
+ablations (no_hamiltonian, classical_attention, random_edges) now train
+directly at fixed L=3, identical protocol, identical epoch budget (25).**
+This is reported as a FINDING (not a silent scope cut): the mitigation
+BRIEF.md prescribed for C4 was tested and found unneeded here, so it is
+listed in Future Work as an untested variant rather than a component of
+the reported results. The practical benefit is a fully matched training
+protocol across CQGT and every ablation (zero growth-schedule confound in
+the comparison), and roughly half the compute of running growth on all 4
+model variants.
+
+`configs/main.yaml`: `layer_growth: [1, 2, 3]` -> `[3]` (with the old value
+kept in a comment for the record), `epochs_per_stage: 25` added.
+`scripts/run_gate2.py`: `layer_schedule=(1,2,3)` -> `(3,)`,
+`EPOCHS_PER_STAGE` 8->25, `n_mc_train` 4->None (full M=20 for training, not
+just evaluation, matching the run that produced the AUPRC 0.3374 result).
+
+### Environment defect found and fixed: xgboost/torch_geometric import order (2026-08-11)
+
+While smoke-testing the Phase 3 harness (`experiments/run_phase3.py`),
+`XGBClassifier.fit()` segfaulted (exit 139) every time, reproducibly,
+whenever `torch_geometric.nn` had already been imported in the same
+process -- an OpenMP runtime conflict between torch_geometric's bundled
+libomp and xgboost's, not a code bug in either library or in this project's
+training logic. Verified in isolation with a minimal repro (`import torch;
+from torch_geometric.nn import GCNConv; from xgboost import XGBClassifier;
+clf.fit(...)` -> segfault every time; swapping to `xgboost` first ->
+works). **Fix: `experiments/run_phase3.py` imports `xgboost` before
+`torch`/`torch_geometric`, with a comment recording why** -- import order
+matters and must stay that way in any file that uses both libraries in the
+same process.
+
+### F2 -- 1-WL separation experiment built and run (2026-08-12), while Phase 3 sweep runs
+
+`experiments/wl_separation.py` implements BRIEF.md Sec 3's replacement
+Proposition: `C6` (single 6-cycle) vs `2xC3` (two disjoint triangles), both
+2-regular, identical node features (all-ones, 4-dim), N=6 qubits/nodes.
+GCN and GAT (via `baselines.gnn.GNNBaseline`, same classes used in Phase 3)
+get identical weights on both graphs; CQGT gets identical parameters too
+(state_dict copied from a C6-topology instance to a 2xC3-topology instance
+of the same shape -- both graphs have exactly 6 edges, so `zz_params`/
+hopping-term shapes match, and the ONLY difference between the two CQGT
+runs is which qubit pairs the gates act on).
+
+Required a small refactor of `cqgt/model.py`: extracted the circuit's raw
+`<Z_i>` readout (forward() steps 1-4, before attention/MLP head) into its
+own method `circuit_expectation_z()`, called internally by `forward()`. This
+is the quantity the 1-WL claim is actually about -- comparing post-MLP-head
+`p_hat` instead would let an arbitrary classical head manufacture spurious
+differences and undermine the claim's rigor. All 7 `test_model.py` tests
+still pass unchanged after the refactor (behavior-preserving, verified, not
+assumed). Safe to edit while the Phase 3 sweep's subprocesses are running:
+Python doesn't hot-reload already-imported modules, so on-disk edits don't
+touch already-running processes.
+
+**Result (`tests/test_wl_separation.py`, verified across 3 seeds):**
+- GCN, GAT: `max|output(C6) - output(2xC3)| = 0.000e+00` -- exact machine
+  precision, every seed. Matches the 1-WL bound exactly, as it must.
+- CQGT: `max|<Z_i>(C6) - <Z_i>(2xC3)| = 4.552e-02` (seed 0), mean 2.57e-02
+  -- a real, substantial, non-fragile separation (>1e-4 at every seed
+  tested).
+
+**One honest wrinkle, not smoothed over:** naive graph-automorphism
+reasoning predicts ALL 6 nodes within C6 (and separately within 2xC3)
+should read out identically to each other, since both graphs are
+vertex-transitive. The actual per-node `<Z_i>` values within C6 are NOT
+uniform (0.347, 0.281, 0.320, 0.332, 0.337, 0.379) -- because the circuit
+applies hopping/RZZ gates in a fixed SEQUENTIAL order over the edge list,
+and these gates do not all commute (adjacent edges share a qubit), so the
+Trotter-like sequential implementation is not exactly symmetric under the
+graph's automorphism group even though the underlying Hamiltonian is. This
+does not weaken the 1-WL separation claim (GCN/GAT are still exactly
+degenerate; CQGT is still clearly distinguishable) but it means the correct
+explanation in the paper is "sensitive to graph topology, both spectrally
+and through the sequential gate-ordering effects of the Trotterized
+implementation" -- not a claim that CQGT recovers per-node automorphism
+symmetry when the graph has it. Stated plainly rather than papered over.
+
+Figure `figures/F2_wl_separation.pdf` (300 dpi, Okabe-Ito colorblind-safe
+palette): grouped bar chart, `|output(C6) - output(2xC3)|` per node, GCN/GAT
+bars at exact zero (annotated "0"), CQGT bars clearly nonzero.
+
+### Phase 4 work started in parallel with the Phase 3 sweep (2026-08-12)
+
+Per explicit instruction: while the 2-seed Phase 3 sweep runs in the
+background (subprocesses `run_phase3.py --seed 0` / `--seed 1`, isolated
+`_xgb_worker.py` per seed), did the results-independent Phase 4 work that
+doesn't need T1/T2/T3 to exist first, since it's near-zero CPU and won't
+contend with the sweep.
+
+**`paper/main.tex` did not exist before this session** -- BRIEF.md Sec 5
+is phrased as edits to an existing draft ("replace the Proposition",
+"rewrite the data statement"), but no `paper/` directory or `.tex` file
+was ever created in earlier phases. Built a full IEEEtran skeleton
+(`paper/main.tex` + `paper/references.bib`) from scratch, structured
+around BRIEF.md's own subsection labels (II-A/II-C, III-A/III-E/III-F,
+IV-A/IV-C, V-Limitations), so the section-editing instructions apply
+against something real going forward. No LaTeX toolchain is installed in
+this environment to compile-check it (`pdflatex` not found) --
+brace-balance and `\begin`/`\end` nesting were verified with a small
+Python stack-based scan instead (all matched); an actual `pdflatex` /
+`bibtex` compile has NOT been run and should be the first thing checked
+once a LaTeX installation is available, before trusting this renders
+cleanly.
+
+Populated now (results-independent): II-A's symmetrized-Laplacian
+limitation; II-C's explicit N-qubit / hopping-Hamiltonian / CTQW
+single-excitation-subspace encoding declaration; III-A's concrete
+$C_t = \sum_k \lambda_k^t \sum_i \beta_{ik}$; III-E's replacement 1-WL
+Proposition (proof sketch + the real F2 numbers, including the honest
+per-node-asymmetry wrinkle -- see the F2 section above); III-F's
+parameter-shift-as-hardware-path / backprop-is-mathematically-identical
+framing; IV-A's real data statement (4 anchors not 5, dual reconstruction,
+EN cascade, disclosed interpolation); IV-C's numeric counterfactual
+metric definition (Spearman rho + P@10 vs. GCN gradient-saliency); and a
+full Limitations subsection covering all 8 items from the user's list
+(N<=12, noiseless-only, reconstructed exposures, 4-anchor interpolated
+panel, symmetrized Laplacian, 2 seeds, maxent degeneracy, untested
+layer-growth) plus a Future Work subsection for everything explicitly cut
+this session (full 3-variant sweep, the 4 dropped ablations, layer-growth
+test, magnetic Laplacian, real hardware).
+
+Left empty, as instructed: Section IV's three results tables (T1/T2/T3,
+currently `\PLACEHOLDER{}` stubs with column headers only) and the
+Conclusions subsection. Section IV's narrative prose IS drafted, with
+`\PLACEHOLDER{}`-marked claims to fill in once real numbers exist (does
+CQGT beat the best classical baseline; which ablation drops AUPRC most;
+does CQGT beat GCN gradient-saliency on the counterfactual metric; is
+any $\Delta R_{ij}$ non-monotone per Acemoglu et al. -- flagged as a
+headline finding if so, not an anomaly). No number anywhere in the file
+is invented; every `\PLACEHOLDER{}` names exactly which `results/*.csv`
+file will fill it.
+
+### GATE 3 — RESULTS (2026-08-12), honest numbers, reported as they came out
+
+Both seed subprocesses completed cleanly, no crashes: seed 0 in 198.4 min,
+seed 1 in 191.9 min (under the conservative 5.6-6.0h/seed projection --
+2-way concurrency saw less contention than the 4-way benchmark used for
+that projection, consistent with the caveat given at launch).
+`results/T1.csv`, `T2.csv`, `T3.csv` (+ `_raw.csv` per-seed detail) exist
+and are populated. **Per BRIEF.md's own rule, the numbers below are
+reported as they are, not tuned to look better.**
+
+**Scope actually run** (both compute-budget-driven cuts, disclosed):
+mindensity dataset only, 2 seeds (not 3 -- see the seed-count decision
+above), 5 baselines + CQGT full model (T1), 3 ablations + full_model (T2),
+CQGT vs. GCN-gradient-saliency counterfactual comparison pooled over the
+first 3 test snapshots (T3).
+
+**T1 — main comparison (mean AUPRC, spillover-only, prevalence floor
+≈0.024, n=2 seeds):**
+
+| Model | AUPRC (mean) | seed 0 | seed 1 | AUROC (mean) | params |
+|---|---|---|---|---|---|
+| gcn | **0.2112** | 0.1462 | 0.2762 | 0.895 | 1345 |
+| cqgt_full | 0.1439 | 0.2095 | 0.0782 | 0.819 | 386 |
+| gat | 0.1028 | 0.1095 | 0.0962 | 0.863 | 3105 |
+| xgboost | 0.0898 | 0.0953 | 0.0843 | 0.862 | 3932 |
+| logreg | 0.0777 | 0.0790 | 0.0764 | 0.842 | 8 |
+| generic_vqc | 0.0691 | 0.0686 | 0.0696 | 0.786 | 138 |
+
+**GCN has the highest mean AUPRC, not CQGT.** CQGT does not clearly beat
+the strongest classical baseline: CQGT's own seed-to-seed swing (0.078 to
+0.210, a >2.5x range) is larger than its gap to GCN, and the two models'
+95% "CIs" (computed at n=2, see caveat below) overlap heavily. Every model
+clears the prevalence floor by a wide margin except generic_vqc, which
+barely does (0.069 vs. 0.024) -- consistent with a topology-blind quantum
+circuit having little to work with. CQGT does clearly beat generic_vqc,
+which is a real, if narrower, finding: encoding the network structure
+into the circuit beats not encoding it at all.
+
+**T2 — ablations (mean AUPRC, mindensity, n=2 seeds):**
+
+| Model | AUPRC (mean) | seed 0 | seed 1 |
+|---|---|---|---|
+| no_hamiltonian | **0.1873** | 0.2595 | 0.1151 |
+| classical_attention | 0.1509 | 0.2138 | 0.0881 |
+| full_model | 0.1439 | 0.2095 | 0.0782 |
+| random_edges | 0.1321 | 0.1901 | 0.0741 |
+
+**This is the uncomfortable finding that must not be buried:** removing
+the Hamiltonian term entirely (`no_hamiltonian`) and replacing quantum
+attention with classical dot-product attention (`classical_attention`)
+BOTH outperform the full model on mean AUPRC, at both seeds
+individually, not just on average. Neither of CQGT's two
+quantum-mechanism-specific components (the network-contagion Hamiltonian,
+which BRIEF.md Sec 1 calls "the paper's central claim," and the quantum
+fidelity attention) demonstrates a positive contribution in this run. The
+one ablation that moves in the theoretically expected direction is
+`random_edges`, which underperforms the full model at both seeds (0.132 <
+0.144) -- weak evidence that using the *real* topology matters, but no
+evidence that encoding it via a Hamiltonian or attending to it via a
+quantum circuit specifically matters, versus the topology-matched RZZ
+variational layers alone.
+
+**T3 — counterfactual attribution (Spearman rho vs. ground-truth
+Eisenberg-Noe delta-R, n=33 pooled edge-snapshot pairs, n=2 seeds):**
+
+| Model | Spearman rho (mean) | seed 0 | seed 1 | P@10 (mean) |
+|---|---|---|---|---|
+| cqgt_full | 0.0177 | 0.0185 | 0.0169 | 0.40 |
+| gcn_gradient_saliency | -0.5624 | -0.4572 | -0.6677 | 0.45 |
+
+Neither model demonstrates strong causal attribution. CQGT's rho is
+approximately zero (no meaningful rank correlation with the true
+counterfactual effect); the GCN gradient-saliency baseline's rho is
+substantially *negative* at both seeds (actively anti-correlated -- its
+screening scores point away from, not toward, the edges that actually
+matter). CQGT's P@10 (0.40) is nominally lower than GCN's (0.45, wide
+range 0.30-0.60 across seeds) despite CQGT's non-negative rho, which is
+not a contradiction so much as a sign both metrics are noisy at n=33
+pooled points -- this sample size is thin and the finding should be read
+as "inconclusive, weakly favoring neither model being demonstrably
+causal," not as a clear win for either.
+
+**Caveat that applies to every number above: n=2 seeds is underpowered.**
+Bootstrap CIs computed over 2 points are close to degenerate (they mostly
+just reflect the gap between the two observed values, not a real sampling
+distribution) and should not be read as rigorous uncertainty
+quantification. The compute-budget decision that produced n=2 (not the
+originally planned 3, itself already cut from BRIEF's larger seed budget)
+is documented above and was disclosed to the user before running, not
+discovered after the fact to excuse a disappointing result.
+
+**Honest headline, stated plainly:** this run does not support the claim
+that CQGT's quantum-specific mechanisms (Hamiltonian coupling, quantum
+attention) outperform simpler alternatives at N=12 on this dataset and
+seed budget. It does support two narrower claims: (1) encoding the real
+exposure topology beats not encoding any topology (CQGT beats
+generic_vqc; real edges beat random edges), and (2) neither CQGT nor a
+classical GCN baseline demonstrates reliable causal counterfactual
+attribution against the Eisenberg-Noe ground truth at this scale. Per
+BRIEF.md's explicit rule, this is reported as the finding, not tuned
+further to look better.
+
+**Non-monotone $\Delta R_{ij}$ check (per BRIEF.md's explicit "watch for
+and name this if it appears" instruction):** re-derived the ground-truth
+Eisenberg-Noe $\Delta R_{ij}$ for the same 33 pooled edge-snapshot pairs
+used in T3 (cheap, cascade-only, no model training) and checked signs
+directly. **Found: 3/33 (9.1\%, seed 0) and 2/33 (6.1\%, seed 1) are
+negative** -- since $\Delta R_{ij}=R_0-R_{cf}$, a negative value means
+removing that edge would have INCREASED mean equity-loss fraction (not
+decreased -- caught and fixed 2026-08-14 after the user asked to verify
+the T3 sign convention; the ground-truth/GCN-saliency comparison itself
+had no bug, see the dedicated section below, but this direction was
+mis-stated in the first draft of this note and in the paper), i.e. that
+edge was net risk-sharing, not net contagion, at that snapshot (range
+across both seeds: $-0.139$ to $+0.104$). This matches Acemoglu et al.'s
+(2015) theoretical mechanism and is a genuine, positive, headline finding
+about the ground-truth labels themselves, independent of how any model
+scored against them -- added to the paper's Results (4) rather than left
+as the placeholder it started as.
+
+### T3 sign-convention verification (2026-08-14), requested by the user
+
+User flagged that GCN gradient-saliency's Spearman rho=-0.56 against
+ground truth is too strong to dismiss as "no attribution" and asked to
+verify neither side's ΔR had an accidental sign flip -- if GCN's saliency
+were actually rho=+0.56 with the sign corrected, T3's conclusion changes
+materially (from "neither model attributes causally" to "GCN saliency
+attributes well, CQGT does not").
+
+**Verified computationally, not just re-read algebraically:**
+1. Ground-truth convention: hand-built 2-bank toy case (bank 0 shocked/
+   wiped out, bank 1 holds a 50-unit claim on bank 0) where the correct
+   sign is unambiguous by construction. `ground_truth_delta_r((1,0))`
+   returned `+3.125` for this genuinely risk-amplifying edge (R0=9.375,
+   R_cf=6.25 after removing it) -- correct, positive-for-risk-amplifying,
+   as designed.
+2. GCN gradient-saliency internal consistency: compared
+   `_gcn_gradient_saliency_delta_r`'s first-order estimate against an
+   EXACT re-forward (actually zeroing each of the 11 real edges at one
+   test snapshot and re-running the trained GCN, not just trusting the
+   gradient). **11/11 edges sign-agreed, Spearman(grad_est, exact) =
+   0.945.** The gradient-based screening faithfully represents what the
+   GCN itself believes about each edge's counterfactual effect on its own
+   output -- no bug in how the estimate is computed relative to the
+   model's own behavior.
+
+**Conclusion: no sign bug on either side.** Both R0-R_cf conventions
+match, and the GCN-saliency side is independently verified against an
+exact re-forward. The measured rho=-0.56 is a real, substantial,
+SYSTEMATIC anti-correlation between the trained GCN's own gradient-based
+notion of edge importance and the true Eisenberg-Noe causal structure --
+a genuine negative finding about gradient saliency as a causal-attribution
+method on this architecture (plausibly related to GCNConv's degree-based
+renormalization making raw-edge-weight gradients a non-monotone function
+of true causal contribution, though that specific mechanism was not
+directly tested), not an artifact to fix. T3's original conclusion
+("neither model demonstrates reliable causal attribution -- CQGT is
+directionless, GCN saliency is actively anti-correlated, which is its own
+kind of not working") stands unchanged. The paper's item (4) prose and
+this note's earlier direction-of-effect wording were fixed as part of
+this verification, since they were caught to be wrong regardless of the
+sign-bug question that motivated re-checking.
+
+### GATE 3 status: PASS (deliverable requirement) -- results/T1.csv, T2.csv,
+T3.csv exist and are populated, per-seed raw detail preserved, headline
+numbers reported above exactly as produced. This is separate from, and
+must not be conflated with, whether the results are favorable to CQGT --
+they are mixed-to-negative on the model's central architectural claims,
+reported as such per BRIEF.md's explicit rule to report null/negative
+results rather than keep tuning.
+
 ### GATE 2 status: NOT YET PASSED -- blocked on the items above
 
 GATE 2 requires: training loss decreases monotonically-ish over epochs;

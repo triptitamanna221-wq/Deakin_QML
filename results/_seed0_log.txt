@@ -1,0 +1,14 @@
+[seed 0] dataset built in 0.5s, n_edges=24
+[seed 0] T1/logreg: n_params=8 prevalence=0.0248 auprc=0.0790
+[seed 0] T1/xgboost: n_params=3816 prevalence=0.0248 auprc=0.0953
+[seed 0] T1/gcn: n_params=1345 prevalence=0.0248 auprc=0.1462
+[seed 0] T1/gat: n_params=3105 prevalence=0.0248 auprc=0.1095
+[seed 0] T1/generic_vqc: n_params=138 prevalence=0.0248 auprc=0.0686
+[seed 0] T1/cqgt_full: n_params=386 prevalence=0.0248 auprc=0.2095
+[seed 0] T2/full_model: n_params=386 prevalence=0.0248 auprc=0.2095
+[seed 0] T2/no_hamiltonian: n_params=386 prevalence=0.0248 auprc=0.2595
+[seed 0] T2/classical_attention: n_params=386 prevalence=0.0248 auprc=0.2138
+[seed 0] T2/random_edges: n_params=386 prevalence=0.0248 auprc=0.1901
+[seed 0] T3/cqgt_full: spearman_rho=0.0185 P@10=0.4000 (n_pooled=33)
+[seed 0] T3/gcn_gradient_saliency: spearman_rho=-0.4572 P@10=0.3000 (n_pooled=33)
+[seed 0] done in 198.4 min

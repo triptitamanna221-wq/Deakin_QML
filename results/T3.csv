@@ -1,0 +1,3 @@
+table,model,n_seeds,n_edges_pooled_mean,n_edges_pooled_ci_lo,n_edges_pooled_ci_hi,spearman_rho_mean,spearman_rho_ci_lo,spearman_rho_ci_hi,precision_at_10_mean,precision_at_10_ci_lo,precision_at_10_ci_hi
+T3,cqgt_full,2,33.0,33.0,33.0,0.01768558354872915,0.016892300177617,0.0184788669198413,0.4,0.4,0.4
+T3,gcn_gradient_saliency,2,33.0,33.0,33.0,-0.5624468941954915,-0.6677426893740388,-0.4571510990169443,0.44999999999999996,0.3,0.6

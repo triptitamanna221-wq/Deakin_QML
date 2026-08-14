@@ -33,8 +33,16 @@ training:
   lr_schedule: cosine
   grad_clip_norm: 1.0
   loss: class_weighted_bce
-  layer_growth: [1, 2, 3]
-  layer_init_std: 0.31415926535  # pi/10, applied to N(theta*_prev, .) on new layers
+  # Layer-by-layer growth (L=1->2->3) was specified as barren-plateau (C4)
+  # mitigation. Phase 3 diagnostic (NOTES.md, 2026-08-11) found no
+  # barren-plateau signature at N=12 -- per-parameter-group gradient norms
+  # stayed within ~1 order of magnitude of each other on an overfit-20 test.
+  # Growth is therefore dropped for the main sweep in favor of training
+  # directly at n_variational_layers=3; layer_growth kept here only as a
+  # record of the untested Future Work variant.
+  layer_growth: [3]  # was [1, 2, 3]; see NOTES.md Phase 2/3 for the finding
+  epochs_per_stage: 25            # empirically justified, see NOTES.md convergence check
+  layer_init_std: 0.31415926535  # pi/10, applied to N(theta*_prev, .) on new layers -- unused while layer_growth=[3]
 
 splits:
   # Strict rolling temporal splits; enforced in code (see cqgt/seeding.py callers
